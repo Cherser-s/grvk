@@ -28,7 +28,7 @@ static VkExtent3D getMinimumExtent(
 
         extent.width = MIN(extent.width, grColorTargetView->extent.width);
         extent.height = MIN(extent.height, grColorTargetView->extent.height);
-        extent.depth = MIN(extent.depth, grColorTargetView->extent.depth);
+        extent.depth = MIN(extent.depth, grColorTargetView->layerCount);//depth is 1 here
     }
 
     if (depthTarget != NULL) {
@@ -44,7 +44,8 @@ static VkFramebuffer getVkFramebuffer(
     unsigned colorTargetCount,
     const GR_COLOR_TARGET_BIND_INFO* colorTargets,
     const GR_DEPTH_STENCIL_BIND_INFO* depthTarget,
-    VkExtent3D extent)
+    VkExtent3D extent //contains layerCount as depth field
+    )
 {
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
 
@@ -71,7 +72,7 @@ static VkFramebuffer getVkFramebuffer(
         .pAttachments = attachments,
         .width = extent.width,
         .height = extent.height,
-        .layers = extent.depth,
+        .layers = extent.depth,//actually layer count
     };
 
     if (vki.vkCreateFramebuffer(device, &framebufferCreateInfo, NULL,

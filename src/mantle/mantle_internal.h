@@ -21,8 +21,17 @@ GR_PHYSICAL_GPU_TYPE getGrPhysicalGpuType(
 VkFormat getVkFormat(
     GR_FORMAT format);
 
+VkImageType getImageType(
+    GR_IMAGE_TYPE type);
+
 VkImageLayout getVkImageLayout(
     GR_IMAGE_STATE imageState);
+
+VkImageUsageFlags getVkImageUsageFlags(
+    GR_IMAGE_USAGE_FLAGS usage);
+
+VkImageTiling getVkImageTiling(
+    GR_IMAGE_TILING tiling);
 
 VkAccessFlags getVkAccessFlagsImage(
     GR_IMAGE_STATE imageState);
