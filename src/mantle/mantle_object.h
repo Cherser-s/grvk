@@ -43,6 +43,7 @@ typedef struct _GrObject {
 typedef struct _GrCmdBuffer {
     GrStructType sType;
     VkCommandBuffer commandBuffer;
+    VkQueryPool timestampQueryPool;
     GrPipeline* grPipeline;
     GrDescriptorSet* grDescriptorSet;
     GR_COLOR_TARGET_BIND_INFO colorTargets[GR_MAX_COLOR_TARGETS];
