@@ -114,6 +114,7 @@ static void dumpKernel(
 
 uint32_t* ilcCompileShader(
     unsigned* compiledSize,
+    const GR_DESCRIPTOR_SET_MAPPING* mappings,
     const void* code,
     unsigned size)
 {
@@ -129,7 +130,7 @@ uint32_t* ilcCompileShader(
         dumpKernel(kernel, name);
     }
 
-    uint32_t* compiledCode = ilcCompileKernel(compiledSize, kernel);
+    uint32_t* compiledCode = ilcCompileKernel(compiledSize, mappings, kernel);
 
     if (dump) {
         dumpBuffer((uint8_t*)compiledCode, *compiledSize, name, "spv");

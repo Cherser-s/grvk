@@ -54,13 +54,18 @@ static void initCmdBufferResources(
 
     vki.vkCmdBindPipeline(grCmdBuffer->commandBuffer, bindPoint, grPipeline->pipeline);
 
-    LOGW("HACK only one descriptor bound\n");
+    //unwrap descriptor set tree
     vki.vkCmdBindDescriptorSets(grCmdBuffer->commandBuffer, bindPoint,
                                 grPipeline->pipelineLayout, 0, 1,
-                                grCmdBuffer->grDescriptorSet->descriptorSets, 0, NULL);
-
+                                &grCmdBuffer->grDevice->globalDescriptorSet.descriptorTable, 0, NULL);
+    unsigned size = sizeof(uint64_t) * 2;
+    uint64_t descSetBuffer[2] = {
+        grCmdBuffer->graphicsDescriptorSets[0] == NULL ? 0 : (grCmdBuffer->graphicsDescriptorSets[0]->bufferDevicePtr + sizeof(uint64_t) * grCmdBuffer->graphicsDescriptorSetOffsets[0]),
+        grCmdBuffer->graphicsDescriptorSets[1] == NULL ? 0 : (grCmdBuffer->graphicsDescriptorSets[1]->bufferDevicePtr + sizeof(uint64_t) * grCmdBuffer->graphicsDescriptorSetOffsets[1])
+    };
+    vki.vkCmdPushConstants(grCmdBuffer->commandBuffer, grPipeline->pipelineLayout, VK_SHADER_STAGE_ALL_GRAPHICS, 0, size, descSetBuffer);
     VkFramebuffer framebuffer =
-        getVkFramebuffer(grCmdBuffer->grDescriptorSet->device, grPipeline->renderPass,
+        getVkFramebuffer(grCmdBuffer->grDevice->device, grPipeline->renderPass,
                          grCmdBuffer->attachmentCount, grCmdBuffer->attachments,
                          grCmdBuffer->minExtent2D, grCmdBuffer->minLayerCount);
 
@@ -185,17 +190,16 @@ GR_VOID grCmdBindDescriptorSet(
     LOGT("%p 0x%X %u %p %u\n", cmdBuffer, pipelineBindPoint, index,  descriptorSet, slotOffset);
     GrCmdBuffer* grCmdBuffer = (GrCmdBuffer*)cmdBuffer;
     GrDescriptorSet* grDescriptorSet = (GrDescriptorSet*)descriptorSet;
-
-    if (pipelineBindPoint != GR_PIPELINE_BIND_POINT_GRAPHICS) {
-        LOGW("unsupported bind point 0x%x\n", pipelineBindPoint);
-    } else if (index != 0) {
-        LOGW("unsupported index %u\n", index);
-    } else if (slotOffset != 0) {
-        LOGW("unsupported slot offset %u\n", slotOffset);
+    assert(index < 2);
+    if (pipelineBindPoint == GR_PIPELINE_BIND_POINT_GRAPHICS) {
+        grCmdBuffer->graphicsDescriptorSetOffsets[index] = slotOffset;
+        grCmdBuffer->graphicsDescriptorSets[index] = grDescriptorSet;
+        grCmdBuffer->isDirty = true;
+    } else {
+        grCmdBuffer->computeDescriptorSetOffsets[index] = slotOffset;
+        grCmdBuffer->computeDescriptorSets[index] = grDescriptorSet;
     }
 
-    grCmdBuffer->grDescriptorSet = grDescriptorSet;
-    grCmdBuffer->isDirty = true;
 }
 
 GR_VOID grCmdPrepareMemoryRegions(

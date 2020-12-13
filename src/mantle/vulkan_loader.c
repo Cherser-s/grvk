@@ -153,6 +153,7 @@ void vulkanLoaderInstanceInit(VkInstance instance)
     LOAD_VULKAN_FN(vki, instance, vkGetPipelineCacheData);
     LOAD_VULKAN_FN(vki, instance, vkGetQueryPoolResults);
     LOAD_VULKAN_FN(vki, instance, vkGetRenderAreaGranularity);
+    LOAD_VULKAN_FN(vki, instance, vkGetBufferDeviceAddress);
     LOAD_VULKAN_FN(vki, instance, vkInvalidateMappedMemoryRanges);
     LOAD_VULKAN_FN(vki, instance, vkMapMemory);
     LOAD_VULKAN_FN(vki, instance, vkMergePipelineCaches);
@@ -169,7 +170,6 @@ void vulkanLoaderInstanceInit(VkInstance instance)
     LOAD_VULKAN_FN(vki, instance, vkUpdateDescriptorSetWithTemplate);
     LOAD_VULKAN_FN(vki, instance, vkUpdateDescriptorSets);
     LOAD_VULKAN_FN(vki, instance, vkWaitForFences);
-
 #ifdef VK_EXT_extended_dynamic_state
     LOAD_VULKAN_FN(vki, instance, vkCmdBindVertexBuffers2EXT);
     LOAD_VULKAN_FN(vki, instance, vkCmdSetCullModeEXT);

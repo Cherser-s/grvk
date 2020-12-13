@@ -3,127 +3,35 @@
 
 typedef struct _Stage {
     const GR_PIPELINE_SHADER* shader;
-    const VkShaderStageFlagBits flags;
+    VkShaderStageFlagBits flags;
 } Stage;
-
-static VkDescriptorSetLayout getVkDescriptorSetLayout(
-    const VkDevice vkDevice,
-    const Stage* stage)
-{
-    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
-    VkDescriptorSetLayoutBinding* bindings = NULL;
-    unsigned bindingCount = 0;
-
-    if (stage->shader->shader != GR_NULL_HANDLE) {
-        for (int i = 1; i < GR_MAX_DESCRIPTOR_SETS; i++) {
-            const GR_DESCRIPTOR_SET_MAPPING* mapping = &stage->shader->descriptorSetMapping[i];
-
-            if (mapping->descriptorCount > 0) {
-                LOGW("multiple descriptor sets per stage is not supported\n");
-                break;
-            }
-        }
-
-        // TODO handle all descriptor sets
-        const GR_DESCRIPTOR_SET_MAPPING* mapping = &stage->shader->descriptorSetMapping[0];
-
-        // Find maximum entity index to generate unique binding numbers for unused slots
-        unsigned maxEntityIndex = 0;
-        for (int i = 0; i < mapping->descriptorCount; i++) {
-            const GR_DESCRIPTOR_SLOT_INFO* info = &mapping->pDescriptorInfo[i];
-
-            if (info->shaderEntityIndex > maxEntityIndex) {
-                maxEntityIndex = info->shaderEntityIndex;
-            }
-        }
-
-        bindings = malloc(sizeof(VkDescriptorSetLayoutBinding) * mapping->descriptorCount);
-        bindingCount = mapping->descriptorCount;
-
-        for (int i = 0; i < mapping->descriptorCount; i++) {
-            const GR_DESCRIPTOR_SLOT_INFO* info = &mapping->pDescriptorInfo[i];
-
-            if (info->slotObjectType == GR_SLOT_NEXT_DESCRIPTOR_SET) {
-                LOGW("nested descriptor sets are not implemented\n");
-            }
-
-            if (info->slotObjectType == GR_SLOT_UNUSED ||
-                info->slotObjectType == GR_SLOT_NEXT_DESCRIPTOR_SET) {
-                bindings[i] = (VkDescriptorSetLayoutBinding) {
-                    .binding = maxEntityIndex + 1 + i, // HACK: unique binding number, ignored
-                    .descriptorType = getVkDescriptorType(info->slotObjectType),
-                    .descriptorCount = 0,
-                    .stageFlags = 0,
-                    .pImmutableSamplers = NULL,
-                };
-            } else {
-                bindings[i] = (VkDescriptorSetLayoutBinding) {
-                    .binding = info->shaderEntityIndex,
-                    .descriptorType = getVkDescriptorType(info->slotObjectType),
-                    .descriptorCount = 1,
-                    .stageFlags = stage->flags,
-                    .pImmutableSamplers = NULL,
-                };
-            }
-        }
-    }
-
-    const VkDescriptorSetLayoutCreateInfo createInfo = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .pNext = NULL,
-        .flags = 0,
-        .bindingCount = bindingCount,
-        .pBindings = bindings,
-    };
-
-    if (vki.vkCreateDescriptorSetLayout(vkDevice, &createInfo, NULL, &layout) != VK_SUCCESS) {
-        LOGE("vkCreateDescriptorSetLayout failed\n");
-    }
-
-    free(bindings);
-    return layout;
-}
 
 static VkPipelineLayout getVkPipelineLayout(
     const VkDevice vkDevice,
-    const Stage* stages)
+    const VkDescriptorSetLayout* layouts,
+    unsigned descriptorSetCount)
 {
     VkPipelineLayout layout = VK_NULL_HANDLE;
 
-    // One descriptor set layout per stage, with an empty layout for each unused stage
-    VkDescriptorSetLayout descriptorSetLayouts[MAX_STAGE_COUNT];
-
-    for (int i = 0; i < MAX_STAGE_COUNT; i++) {
-        const Stage* stage = &stages[i];
-
-        VkDescriptorSetLayout layout = getVkDescriptorSetLayout(vkDevice, stage);
-
-        if (layout == VK_NULL_HANDLE) {
-            // Bail out
-            for (int j = 0; j < i; j++) {
-                vki.vkDestroyDescriptorSetLayout(vkDevice, descriptorSetLayouts[j], NULL);
-            }
-            return VK_NULL_HANDLE;
-        }
-
-        descriptorSetLayouts[i] = layout;
-    }
+    const VkPushConstantRange pushRange = {
+        .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
+        .offset = 0,
+        .size = sizeof(uint64_t) * GR_MAX_DESCRIPTOR_SETS
+    };
 
     const VkPipelineLayoutCreateInfo createInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .pNext = NULL,
         .flags = 0,
-        .setLayoutCount = MAX_STAGE_COUNT,
-        .pSetLayouts = descriptorSetLayouts,
-        .pushConstantRangeCount = 0,
-        .pPushConstantRanges = NULL,
+        .setLayoutCount = descriptorSetCount,
+        .pSetLayouts = layouts,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pushRange,
     };
 
     if (vki.vkCreatePipelineLayout(vkDevice, &createInfo, NULL, &layout) != VK_SUCCESS) {
         LOGE("vkCreatePipelineLayout failed\n");
-        for (int i = 0; i < MAX_STAGE_COUNT; i++) {
-            vki.vkDestroyDescriptorSetLayout(vkDevice, descriptorSetLayouts[i], NULL);
-        }
+        return VK_NULL_HANDLE;
     }
 
     return layout;
@@ -257,46 +165,92 @@ GR_RESULT grCreateShader(
 {
     LOGT("%p %p %p\n", device, pCreateInfo, pShader);
     GrDevice* grDevice = (GrDevice*)device;
-    VkShaderModule vkShaderModule = VK_NULL_HANDLE;
-    unsigned spirvCodeSize;
-    uint32_t* spirvCode;
-
+    if (grDevice == NULL) {
+        return GR_ERROR_INVALID_HANDLE;
+    }
+    if (grDevice->sType != GR_STRUCT_TYPE_DEVICE) {
+        return GR_ERROR_INVALID_OBJECT_TYPE;
+    }
+    if (pCreateInfo == NULL || pShader == NULL || pCreateInfo->pCode == NULL) {
+        return GR_ERROR_INVALID_POINTER;
+    }
     if ((pCreateInfo->flags & GR_SHADER_CREATE_ALLOW_RE_Z) != 0) {
         LOGW("unhandled Re-Z flag\n");
     }
-
-    if ((pCreateInfo->flags & GR_SHADER_CREATE_SPIRV) == 0) {
-        spirvCode = ilcCompileShader(&spirvCodeSize, pCreateInfo->pCode, pCreateInfo->codeSize);
-    } else {
-        spirvCodeSize = pCreateInfo->codeSize;
-        spirvCode = (uint32_t*)pCreateInfo->pCode;
-    }
-
-    const VkShaderModuleCreateInfo createInfo = {
-        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .pNext = NULL,
-        .flags = 0,
-        .codeSize = spirvCodeSize,
-        .pCode = spirvCode,
-    };
-
-    if (vki.vkCreateShaderModule(grDevice->device, &createInfo, NULL, &vkShaderModule)) {
-        LOGE("vkCreateShaderModule failed\n");
+    GrShader* grShader = malloc(sizeof(GrShader));
+    grShader->sType = GR_STRUCT_TYPE_SHADER;
+    if (grShader == NULL) {
         return GR_ERROR_OUT_OF_MEMORY;
     }
+    grShader->isPrecompiledSpv = (pCreateInfo->flags & GR_SHADER_CREATE_SPIRV) != 0;
+    if (grShader->isPrecompiledSpv) {
+        const VkShaderModuleCreateInfo createInfo = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .pNext = NULL,
+            .flags = 0,
+            .codeSize = pCreateInfo->codeSize,
+            .pCode = (uint32_t*)pCreateInfo->pCode,
+        };
+        // idk whether to free spirvCode in case if shader compiles correctly
+        if (vki.vkCreateShaderModule(grDevice->device, &createInfo, NULL, &grShader->precompiledModule)) {
+            free(grShader);
+            LOGE("vkCreateShaderModule failed\n");
+            return GR_ERROR_OUT_OF_MEMORY;
+        }
+    } else {
+        grShader->codeSize = pCreateInfo->codeSize;
+        grShader->code = (uint32_t*)malloc(pCreateInfo->codeSize);
 
-    if ((pCreateInfo->flags & GR_SHADER_CREATE_SPIRV) == 0) {
-        free(spirvCode);
+        if (grShader->code == NULL) {
+            return GR_ERROR_OUT_OF_MEMORY;
+        }
+        memcpy(grShader->code, pCreateInfo->pCode, pCreateInfo->codeSize);
     }
-
-    GrShader* grShader = malloc(sizeof(GrShader));
-    *grShader = (GrShader) {
-        .sType = GR_STRUCT_TYPE_SHADER,
-        .shaderModule = vkShaderModule,
-    };
 
     *pShader = (GR_SHADER)grShader;
     return GR_SUCCESS;
+}
+
+void calculateDescriptorSetBindingCount(const GR_DESCRIPTOR_SET_MAPPING** mappings, uint32_t mappingCount, uint32_t *outDescriptorCount, uint32_t* outDescriptorSetCount)
+{
+    uint32_t maxDescriptorCount = 0;
+    uint32_t nestedDescriptorSetCount = 0;
+    const GR_DESCRIPTOR_SET_MAPPING* nestedDescriptorSets[5];
+    for (uint32_t i = 0; i < mappingCount; i++) {
+        if (mappings[i]->descriptorCount > maxDescriptorCount) {
+            maxDescriptorCount = mappings[i]->descriptorCount;
+        }
+    }
+    *outDescriptorCount = maxDescriptorCount;
+    *outDescriptorSetCount = 1;
+    for (uint32_t i = 0; i < maxDescriptorCount; ++i) {
+        GR_ENUM slotType = GR_SLOT_UNUSED;
+        for (unsigned j = 0; j < mappingCount; ++j) {
+            if (slotType != GR_SLOT_UNUSED && mappings[j]->pDescriptorInfo[i].slotObjectType != GR_SLOT_UNUSED && mappings[j]->pDescriptorInfo[i].slotObjectType != slotType) {
+                LOGE("Descriptor slot %d is different for different stages\n", i);
+                return;//TODO: add some errors
+            }
+            switch (mappings[j]->pDescriptorInfo[i].slotObjectType) {
+            case GR_SLOT_NEXT_DESCRIPTOR_SET: 
+                nestedDescriptorSets[nestedDescriptorSetCount++] = mappings[j]->pDescriptorInfo[i].pNextLevelSet;
+            case GR_SLOT_SHADER_RESOURCE:
+            case GR_SLOT_SHADER_UAV:
+            case GR_SLOT_SHADER_SAMPLER:
+                slotType = mappings[j]->pDescriptorInfo[i].slotObjectType;
+                break;
+            default:
+                break;
+            }
+        }
+
+        unsigned descriptorCount = 0;
+        unsigned descriptorSetCount = 0;
+        if (slotType == GR_SLOT_NEXT_DESCRIPTOR_SET) {
+            calculateDescriptorSetBindingCount(nestedDescriptorSets, nestedDescriptorSetCount, &descriptorCount, &descriptorSetCount);
+            *outDescriptorCount += descriptorCount;
+            *outDescriptorSetCount += descriptorSetCount;
+        }
+    }
 }
 
 GR_RESULT grCreateGraphicsPipeline(
@@ -310,24 +264,44 @@ GR_RESULT grCreateGraphicsPipeline(
     // Ignored parameters:
     // - iaState.disableVertexReuse (hint)
     // - tessState.optimalTessFactor (hint)
+    Stage stages[MAX_STAGE_COUNT];
+    uint32_t stageCount = 0;
 
-    Stage stages[MAX_STAGE_COUNT] = {
-        { &pCreateInfo->vs, VK_SHADER_STAGE_VERTEX_BIT },
-        { &pCreateInfo->hs, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT },
-        { &pCreateInfo->ds, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT },
-        { &pCreateInfo->gs, VK_SHADER_STAGE_GEOMETRY_BIT },
-        { &pCreateInfo->ps, VK_SHADER_STAGE_FRAGMENT_BIT },
-    };
+    if (pCreateInfo->vs.shader != GR_NULL_HANDLE) {
+        stages[stageCount++] = (Stage){
+            .shader = &pCreateInfo->vs,
+            .flags = VK_SHADER_STAGE_VERTEX_BIT
+        };
+    }
+    if (pCreateInfo->hs.shader != GR_NULL_HANDLE) {
+        stages[stageCount++] = (Stage){
+            .shader = &pCreateInfo->hs,
+            .flags = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT
+        };
+    }
+    if (pCreateInfo->ds.shader != GR_NULL_HANDLE) {
+        stages[stageCount++] = (Stage){
+            .shader = &pCreateInfo->ds,
+            .flags = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT
+        };
+    }
+    if (pCreateInfo->gs.shader != GR_NULL_HANDLE) {
+        stages[stageCount++] = (Stage){
+            .shader = &pCreateInfo->gs,
+            .flags = VK_SHADER_STAGE_GEOMETRY_BIT,
+        };
+    }
+    if (pCreateInfo->ps.shader != GR_NULL_HANDLE) {
+        stages[stageCount++] = (Stage){
+            .shader = &pCreateInfo->ps,
+            .flags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        };
+    }
 
-    unsigned stageCount = 0;
     VkPipelineShaderStageCreateInfo shaderStageCreateInfo[MAX_STAGE_COUNT];
 
-    for (int i = 0; i < MAX_STAGE_COUNT; i++) {
+    for (int i = 0; i < stageCount; i++) {
         Stage* stage = &stages[i];
-
-        if (stage->shader->shader == GR_NULL_HANDLE) {
-            continue;
-        }
 
         if (stage->shader->linkConstBufferCount > 0) {
             // TODO implement
@@ -341,19 +315,50 @@ GR_RESULT grCreateGraphicsPipeline(
 
         GrShader* grShader = (GrShader*)stage->shader->shader;
 
-        shaderStageCreateInfo[stageCount] = (VkPipelineShaderStageCreateInfo) {
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .pNext = NULL,
-            .flags = 0,
-            .stage = stage->flags,
-            .module = grShader->shaderModule,
-            .pName = "main",
-            .pSpecializationInfo = NULL,
-        };
+        if (grShader->isPrecompiledSpv) {
+            shaderStageCreateInfo[i] = (VkPipelineShaderStageCreateInfo) {
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext = NULL,
+                .flags = 0,
+                .stage = stage->flags,
+                .module = grShader->precompiledModule,
+                .pName = "main",
+                .pSpecializationInfo = NULL,
+            };
+        }
+        else {
+            uint32_t codeSize;
+            uint32_t* codeCopy = ilcCompileShader(&codeSize, stage->shader->descriptorSetMapping, grShader->code, grShader->codeSize);
+            if (codeCopy == NULL) {
+                return GR_ERROR_OUT_OF_MEMORY;
+            }
 
-        stageCount++;
+            const VkShaderModuleCreateInfo createInfo = {
+                .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                .pNext = NULL,
+                .flags = 0,
+                .codeSize = codeSize,
+                .pCode = codeCopy
+            };
+            // idk whether to free spirvCode in case if shader compiles correctly
+            VkShaderModule module;
+            VkResult res = vki.vkCreateShaderModule(grDevice->device, &createInfo, NULL, &module);
+            free(codeCopy);
+            if (res != VK_SUCCESS) {
+                LOGE("vkCreateShaderModule failed\n");
+                return GR_ERROR_OUT_OF_MEMORY;
+            }
+            shaderStageCreateInfo[i] = (VkPipelineShaderStageCreateInfo) {
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext = NULL,
+                .flags = 0,
+                .stage = stage->flags,
+                .module = module,
+                .pName = "main",
+                .pSpecializationInfo = NULL,
+            };
+        }
     }
-
     const VkPipelineVertexInputStateCreateInfo vertexInputStateCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .pNext = NULL,
@@ -524,7 +529,7 @@ GR_RESULT grCreateGraphicsPipeline(
         .pDynamicStates = dynamicStates,
     };
 
-    VkPipelineLayout layout = getVkPipelineLayout(grDevice->device, stages);
+    VkPipelineLayout layout = getVkPipelineLayout(grDevice->device, &grDevice->globalDescriptorSet.descriptorTableLayout, 1);
     if (layout == VK_NULL_HANDLE) {
         return GR_ERROR_OUT_OF_MEMORY;
     }
@@ -561,16 +566,31 @@ GR_RESULT grCreateGraphicsPipeline(
         .basePipelineHandle = VK_NULL_HANDLE,
         .basePipelineIndex = -1,
     };
-
-    if (vki.vkCreateGraphicsPipelines(grDevice->device, VK_NULL_HANDLE, 1, &pipelineCreateInfo,
-                                      NULL, &vkPipeline) != VK_SUCCESS) {
+    VkResult result = vki.vkCreateGraphicsPipelines(grDevice->device, VK_NULL_HANDLE, 1,
+                                                    &pipelineCreateInfo,
+                                                    NULL, &vkPipeline);
+    //free remaining shader modules, ""compiled"" only for this pipeline
+    for (unsigned i = 0; i < stageCount;++i) {
+        GrShader* grShader = (GrShader*)stages[i].shader->shader;
+        if (!grShader->isPrecompiledSpv) {
+            vki.vkDestroyShaderModule(grDevice->device, shaderStageCreateInfo[i].module, NULL);
+        }
+    }
+    if (result != VK_SUCCESS) {
         LOGE("vkCreateGraphicsPipelines failed\n");
-        vki.vkDestroyPipelineLayout(grDevice->device, layout, NULL);
-        vki.vkDestroyRenderPass(grDevice->device, renderPass, NULL);
+        if (layout != VK_NULL_HANDLE) {
+            vki.vkDestroyPipelineLayout(grDevice->device, layout, NULL);
+        }
+        if (renderPass != VK_NULL_HANDLE) {
+            vki.vkDestroyRenderPass(grDevice->device, renderPass, NULL);
+        }
         return GR_ERROR_OUT_OF_MEMORY;
     }
 
     GrPipeline* grPipeline = malloc(sizeof(GrPipeline));
+    if (grPipeline == NULL) {
+        return GR_ERROR_OUT_OF_MEMORY;
+    }
     *grPipeline = (GrPipeline) {
         .sType = GR_STRUCT_TYPE_PIPELINE,
         .pipelineLayout = layout,

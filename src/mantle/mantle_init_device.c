@@ -172,6 +172,25 @@ GR_RESULT grGetGpuInfo(
     return GR_ERROR_INVALID_VALUE;
 }
 
+static unsigned getVirtualDescriptorSetBufferMemoryType(const VkPhysicalDeviceMemoryProperties *memoryProps) {
+    unsigned suitableMemoryType = memoryProps->memoryTypeCount;
+    unsigned hostMemoryType = memoryProps->memoryTypeCount;
+    for (unsigned i = 0; i < memoryProps->memoryTypeCount; ++i) {
+        if ((VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) & memoryProps->memoryTypes[i].propertyFlags) {
+            hostMemoryType = i;
+            if (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT & memoryProps->memoryTypes[i].propertyFlags) {
+                suitableMemoryType = i;
+            }
+        }
+    }
+    if (suitableMemoryType < memoryProps->memoryTypeCount) {
+        LOGT("found suitable memory type for descriptor sets: %d\n", suitableMemoryType);
+        return suitableMemoryType;
+    }
+    LOGT("fallback to host memory type for descriptor sets: %d\n", hostMemoryType);
+    return hostMemoryType;
+}
+
 GR_RESULT grCreateDevice(
     GR_PHYSICAL_GPU gpu,
     const GR_DEVICE_CREATE_INFO* pCreateInfo,
@@ -279,9 +298,16 @@ GR_RESULT grCreateDevice(
         goto bail;
     }
 
+    const VkPhysicalDeviceVulkan12Features vk12DeviceFeatures = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+        .pNext = NULL,
+        .descriptorBindingPartiallyBound = VK_TRUE,
+        .bufferDeviceAddress = VK_TRUE,
+        .descriptorIndexing = VK_TRUE,
+    };
     const VkPhysicalDeviceExtendedDynamicStateFeaturesEXT extendedDynamicState = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT,
-        .pNext = NULL,
+        .pNext = &vk12DeviceFeatures,
         .extendedDynamicState = VK_TRUE,
     };
 
@@ -293,11 +319,13 @@ GR_RESULT grCreateDevice(
         .depthClamp = VK_TRUE,
         .multiViewport = VK_TRUE,
         .samplerAnisotropy = VK_TRUE,
+        .shaderInt64 = VK_TRUE,//TODO: try to fallback to 32 bit version if not present
     };
 
     const char *deviceExtensions[] = {
         VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
     };
 
     const VkDeviceCreateInfo createInfo = {
@@ -356,8 +384,128 @@ GR_RESULT grCreateDevice(
             goto bail;
         }
     }
+    unsigned descriptorCount = 10240;
+    const VkDescriptorSetLayoutBinding globalLayoutBindings[5] = {
+        {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
+            .descriptorCount = descriptorCount,
+            .stageFlags = VK_SHADER_STAGE_ALL,
+            .pImmutableSamplers = NULL,
+        },
+        {
+            .binding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
+            .descriptorCount = descriptorCount,
+            .stageFlags = VK_SHADER_STAGE_ALL,
+            .pImmutableSamplers = NULL,
+        },
+        {
+            .binding = 2,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .descriptorCount = descriptorCount,
+            .stageFlags = VK_SHADER_STAGE_ALL,
+            .pImmutableSamplers = NULL,
+        },
+        {
+            .binding = 3,
+            .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            .descriptorCount = descriptorCount,
+            .stageFlags = VK_SHADER_STAGE_ALL,
+            .pImmutableSamplers = NULL,
+        },
+        {
+            .binding = 4,
+            .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
+            .descriptorCount = descriptorCount,
+            .stageFlags = VK_SHADER_STAGE_ALL,
+            .pImmutableSamplers = NULL,
+        }
+    };
+
+    const VkDescriptorPoolSize poolSizes[5] = {
+        {
+            .type = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
+            .descriptorCount = descriptorCount,
+        },
+        {
+            .type = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
+            .descriptorCount = descriptorCount,
+        },
+        {
+            .type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            .descriptorCount = descriptorCount,
+        },
+        {
+            .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .descriptorCount = descriptorCount,
+        },
+        {
+            .type = VK_DESCRIPTOR_TYPE_SAMPLER,
+            .descriptorCount = descriptorCount,
+        },
+    };
+    const VkDescriptorSetLayoutCreateInfo layoutCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext = NULL,
+        .flags = 0,
+        .bindingCount = 5,
+        .pBindings = globalLayoutBindings,
+    };
+    const VkDescriptorPoolCreateInfo poolCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .pNext = NULL,
+        .flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT,
+        .maxSets = 1,
+        .poolSizeCount = 5,
+        .pPoolSizes = poolSizes,
+    };
+    VkDescriptorSetLayout globalLayout;
+    if (vki.vkCreateDescriptorSetLayout(vkDevice, &layoutCreateInfo, NULL,
+                                        &globalLayout) != VK_SUCCESS) {
+        LOGE("vkCreateDescriptorSetLayout failed\n");
+        res = GR_ERROR_INITIALIZATION_FAILED;
+        goto bail;
+    }
+
+    VkDescriptorPool globalPool;
+    if (vki.vkCreateDescriptorPool(vkDevice, &poolCreateInfo, NULL,
+                                   &globalPool) != VK_SUCCESS) {
+        LOGE("vkCreateDescriptorPool failed\n");
+        res = GR_ERROR_INITIALIZATION_FAILED;
+        goto bail;
+    }
+
+    const VkDescriptorSetAllocateInfo allocateInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .pNext = NULL,
+        .descriptorPool = globalPool,
+        .descriptorSetCount = 1,
+        .pSetLayouts = &globalLayout,
+    };
+    VkDescriptorSet globalDescSet;
+    if (vki.vkAllocateDescriptorSets(vkDevice, &allocateInfo,
+                                   &globalDescSet) != VK_SUCCESS) {
+        LOGE("vkCreateDescriptorPool failed\n");
+        res = GR_ERROR_INITIALIZATION_FAILED;
+        goto bail;
+    }
 
     GrDevice* grDevice = malloc(sizeof(GrDevice));
+    if (grDevice == NULL) {
+        res = GR_ERROR_INITIALIZATION_FAILED;
+        goto bail;
+    }
+    VkSampler* descriptorHandleBuffer = (VkSampler*)malloc(sizeof(VkSampler) * 3 * descriptorCount);
+    if (descriptorHandleBuffer == NULL) {
+        res = GR_ERROR_INITIALIZATION_FAILED;
+        goto bail;
+    }
+    memset(descriptorHandleBuffer, 0, sizeof(VkSampler) * 3 * descriptorCount);
+    if (descriptorHandleBuffer == NULL) {
+        res = GR_ERROR_INITIALIZATION_FAILED;
+        goto bail;
+    }
     *grDevice = (GrDevice) {
         .sType = GR_STRUCT_TYPE_DEVICE,
         .device = vkDevice,
@@ -366,10 +514,24 @@ GR_RESULT grCreateDevice(
         .universalCommandPool = universalCommandPool,
         .computeQueueIndex = computeQueueIndex,
         .computeCommandPool = computeCommandPool,
+        .globalDescriptorSet = {
+            .descriptorTableLayout = globalLayout,
+            .descriptorPool = globalPool,
+            .descriptorTable = globalDescSet,
+            .samplers = descriptorHandleBuffer,
+            .samplerPtr = descriptorHandleBuffer,
+            .bufferViews = descriptorHandleBuffer + descriptorCount,
+            .bufferViewPtr = descriptorHandleBuffer + descriptorCount,//TODO: support mutable descriptors
+            .images = descriptorHandleBuffer + 2 * descriptorCount,
+            .imagePtr = descriptorHandleBuffer + 2 * descriptorCount,
+            .descriptorCount = descriptorCount,
+        },
+        .vDescriptorSetMemoryTypeIndex = 2//TODO: select this dynamically, this type if for radv only
     };
     vki.vkGetPhysicalDeviceMemoryProperties(
         grPhysicalGpu->physicalDevice,
         &grDevice->memoryProperties);
+    grDevice->vDescriptorSetMemoryTypeIndex = getVirtualDescriptorSetBufferMemoryType(&grDevice->memoryProperties);
     *pDevice = (GR_DEVICE)grDevice;
 
 bail:
@@ -387,6 +549,15 @@ bail:
         }
         if (vkDevice != VK_NULL_HANDLE) {
             vki.vkDestroyDevice(vkDevice, NULL);
+        }
+        if (globalLayout != VK_NULL_HANDLE) {
+            vki.vkDestroyDescriptorSetLayout(vkDevice, globalLayout, NULL);
+        }
+        if (globalPool != VK_NULL_HANDLE) {
+            vki.vkDestroyDescriptorPool(vkDevice, globalPool, NULL);
+        }
+        if (descriptorHandleBuffer != NULL) {
+            free(descriptorHandleBuffer);
         }
     }
 
@@ -408,6 +579,15 @@ GR_RESULT grDestroyDevice(GR_DEVICE device)
     }
     if (grDevice->computeCommandPool != VK_NULL_HANDLE) {
         vki.vkDestroyCommandPool(grDevice->device, grDevice->computeCommandPool, NULL);
+    }
+    if (grDevice->globalDescriptorSet.descriptorTableLayout != VK_NULL_HANDLE) {
+        vki.vkDestroyDescriptorSetLayout(grDevice->device, grDevice->globalDescriptorSet.descriptorTableLayout, NULL);
+    }
+    if (grDevice->globalDescriptorSet.descriptorPool != VK_NULL_HANDLE) {
+        vki.vkDestroyDescriptorPool(grDevice->device, grDevice->globalDescriptorSet.descriptorPool, NULL);
+    }
+    if (grDevice->globalDescriptorSet.samplerPtr != NULL) {
+        free(grDevice->globalDescriptorSet.samplerPtr); // single allocation, samplers are first
     }
     vki.vkDestroyDevice(grDevice->device, NULL);
     free(grDevice);

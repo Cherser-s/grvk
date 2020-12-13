@@ -35,7 +35,7 @@ typedef enum _GrStructType {
 typedef struct _GrColorTargetView GrColorTargetView;
 typedef struct _GrDescriptorSet GrDescriptorSet;
 typedef struct _GrPipeline GrPipeline;
-
+typedef struct _GrDevice GrDevice;
 // Generic object used to read the object type
 typedef struct _GrObject {
     GrStructType sType;
@@ -43,10 +43,14 @@ typedef struct _GrObject {
 
 typedef struct _GrCmdBuffer {
     GrStructType sType;
+    GrDevice* grDevice;
     VkCommandBuffer commandBuffer;
     VkQueryPool timestampQueryPool;
     GrPipeline* grPipeline;
-    GrDescriptorSet* grDescriptorSet;
+    GrDescriptorSet* graphicsDescriptorSets[2];
+    unsigned graphicsDescriptorSetOffsets[2];
+    GrDescriptorSet* computeDescriptorSets[2];
+    unsigned computeDescriptorSetOffsets[2];
     unsigned attachmentCount;
     VkImageView attachments[GR_MAX_COLOR_TARGETS + 1]; // Extra depth target
     VkExtent2D minExtent2D;
@@ -94,14 +98,53 @@ typedef struct _GrDepthStencilStateObject {
     float maxDepthBounds;
 } GrDepthStencilStateObject;
 
+typedef enum _DescriptorSetSlotType
+{
+    SLOT_TYPE_NONE = 0,
+    SLOT_TYPE_IMAGE_VIEW = 1,
+    SLOT_TYPE_MEMORY_VIEW = 2,
+    SLOT_TYPE_SAMPLER = 3,
+    SLOT_TYPE_NESTED = 4,
+} DescriptorSetSlotType;
+
+typedef struct _DescriptorSetSlot
+{
+    DescriptorSetSlotType type;
+    unsigned realDescriptorIndex;
+    union {
+        VkSampler sampler;
+        VkImageView imageView;
+        VkDeviceAddress nestedDescriptorSet;
+    };
+    //better separate this as it is owned by the slot
+    VkImageLayout imageLayout;
+    VkBufferView bufferView;
+    VkBufferViewCreateInfo bufferViewCreateInfo;
+} DescriptorSetSlot;
+
 typedef struct _GrDescriptorSet {
     GrStructType sType;
-    VkDevice device;
-    VkDescriptorPool descriptorPool;
-    void* slots;
+    GrDevice* device;
+    DescriptorSetSlot* slots;
+    DescriptorSetSlot* tempSlots;
     unsigned slotCount;
-    VkDescriptorSet descriptorSets[MAX_STAGE_COUNT];
+    VkBuffer virtualDescriptorSet;
+    VkDeviceMemory boundMemory;//TODO: make some buddy allocator or like that
+    VkDeviceAddress bufferDevicePtr;
 } GrDescriptorSet;
+
+typedef struct _GrGlobalDescriptorSet {
+    VkDescriptorSetLayout descriptorTableLayout;
+    VkDescriptorPool descriptorPool;
+    VkDescriptorSet descriptorTable;
+    VkSampler* samplers;
+    VkSampler* samplerPtr;
+    VkBufferView* bufferViews;
+    VkBufferView* bufferViewPtr;
+    VkImageView* images;
+    VkImageView* imagePtr;
+    unsigned descriptorCount;
+} GrGlobalDescriptorSet;
 
 typedef struct _GrDevice {
     GrStructType sType;
@@ -112,6 +155,8 @@ typedef struct _GrDevice {
     VkCommandPool universalCommandPool;
     unsigned computeQueueIndex;
     VkCommandPool computeCommandPool;
+    GrGlobalDescriptorSet globalDescriptorSet;
+    unsigned vDescriptorSetMemoryTypeIndex;
 } GrDevice;
 
 typedef struct _GrFence {
@@ -156,11 +201,19 @@ typedef struct _GrPhysicalGpu {
     VkPhysicalDevice physicalDevice;
 } GrPhysicalGpu;
 
+typedef struct _GrNestedDescriptorSetMapping {
+    struct _GrNestedDescriptorSetMapping* nestedSet;
+    struct _GrNestedDescriptorSetMapping* nextSet;
+    unsigned slotIndex;
+} GrNestedDescriptorSetMapping;
+
 typedef struct _GrPipeline {
     GrStructType sType;
     VkPipelineLayout pipelineLayout;
     VkPipeline pipeline;
     VkRenderPass renderPass;
+    GrNestedDescriptorSetMapping nestedDescriptorSets;
+    unsigned boundDescriptorSetCount;
 } GrPipeline;
 
 typedef struct _GrRasterStateObject {
@@ -179,7 +232,11 @@ typedef struct _GrSampler {
 
 typedef struct _GrShader {
     GrStructType sType;
-    VkShaderModule shaderModule;
+    GrDevice* device;
+    bool isPrecompiledSpv;
+    VkShaderModule precompiledModule;
+    uint32_t* code;
+    uint32_t  codeSize;
 } GrShader;
 
 typedef struct _GrQueue {

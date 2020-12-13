@@ -1,6 +1,6 @@
 #include "amdilc_spirv.h"
 #include "amdilc_internal.h"
-
+#include <mantle/mantle.h>
 #define MAX_SRC_COUNT       (8)
 #define ZERO_LITERAL        (0x00000000)
 #define ONE_LITERAL         (0x3F800000)
@@ -18,6 +18,7 @@
 #define COMP_MASK_XYZ       (COMP_MASK_XY | COMP_MASK_Z)
 #define COMP_MASK_XYZW      (COMP_MASK_XYZ | COMP_MASK_W)
 
+
 typedef struct {
     IlcSpvId id;
     IlcSpvId typeId;
@@ -27,9 +28,12 @@ typedef struct {
 } IlcRegister;
 
 typedef struct {
-    IlcSpvId id;
+    IlcSpvId resourceIndexId;
     IlcSpvId typeId;
     IlcSpvId depthTypeId; // needed for depth sample operations
+    IlcSpvId imageTypePtrId;
+    IlcSpvId depthTypePtrId;
+    IlcSpvId imageRepoId;
     uint32_t ilId;
     uint32_t strideId;
     uint32_t ilType;
@@ -37,8 +41,10 @@ typedef struct {
 } IlcResource;
 
 typedef struct {
-    IlcSpvId id;
+    IlcSpvId resourceIndexId;
     IlcSpvId typeId;
+    IlcSpvId pTypeId;
+    IlcSpvId repoId;
     uint32_t ilId;
     uint32_t strideId;
     uint32_t ilType;
@@ -88,6 +94,13 @@ typedef struct {
 } IlcControlFlowBlock;
 
 typedef struct {
+    IlcSpvId pushConstantsVariable;
+    IlcSpvId pushConstantsItemType;
+    IlcSpvId virtualDescriptorType;
+    IlcSpvId uint64BufferPtrId;
+} VirtualDescriptorResources;
+
+typedef struct {
     IlcSpvModule* module;
     const Kernel* kernel;
     IlcSpvId entryPointId;
@@ -98,11 +111,19 @@ typedef struct {
     IlcSpvId uintId;
     IlcSpvId uint4Id;
     IlcSpvId zeroUintId;
+    IlcSpvId uint64Id;
+    IlcSpvId uint64PtrId;
     IlcSpvId boolId;
     IlcSpvId bool4Id;
     IlcSpvId samplerId;
+    IlcSpvId samplerPtrId;
+    IlcSpvId samplerRepositoryId;
+    VirtualDescriptorResources descriptorSetTypes;
+    const GR_DESCRIPTOR_SET_MAPPING* mappings;
     unsigned regCount;
     IlcRegister* regs;
+    unsigned resourceRepoCount;
+    IlcSpvId* resourceRepositories;
     unsigned resourceCount;
     IlcResource* resources;
     unsigned uavResourceCount;
@@ -229,6 +250,49 @@ static const IlcUavResource* findUavResource(
     return NULL;
 }
 
+static const IlcResource* findResourceTable(
+    IlcCompiler* compiler,
+    IlcSpvId typeId)
+{
+    for (int i = 0; i < compiler->resourceCount; i++) {
+        const IlcResource* resource = &compiler->resources[i];
+
+        if (resource->typeId == typeId) {
+            return resource;
+        }
+    }
+
+    return NULL;
+}
+
+static const IlcUavResource* findUavResourceTable(
+    IlcCompiler* compiler,
+    IlcSpvId typeId)
+{
+    for (int i = 0; i < compiler->uavResourceCount; i++) {
+        const IlcUavResource* resource = &compiler->uavResources[i];
+
+        if (resource->typeId == typeId) {
+            return resource;
+        }
+    }
+
+    return NULL;
+}
+
+static void addResourceTable(IlcCompiler* compiler,
+                                 IlcSpvId repoId)
+{
+    char name[32];
+    snprintf(name, 32, "resourceRepo%u", repoId);
+    ilcSpvPutName(compiler->module, repoId, name);
+
+    compiler->resourceRepoCount++;
+    compiler->resourceRepositories = realloc(compiler->resourceRepositories,
+                                  sizeof(IlcResource) * compiler->resourceRepoCount);
+    compiler->resourceRepositories[compiler->resourceRepoCount - 1] = repoId;
+}
+
 static const IlcResource* addResource(
     IlcCompiler* compiler,
     const IlcResource* resource)
@@ -240,8 +304,8 @@ static const IlcResource* addResource(
     }
 
     char name[32];
-    snprintf(name, 32, "resource%u", resource->ilId);
-    ilcSpvPutName(compiler->module, resource->id, name);
+    snprintf(name, 32, "resourceIndex%u", resource->ilId);
+    ilcSpvPutName(compiler->module, resource->resourceIndexId, name);
 
     compiler->resourceCount++;
     compiler->resources = realloc(compiler->resources,
@@ -261,8 +325,8 @@ static const IlcUavResource* addUavResource(
     }
 
     char name[32];
-    snprintf(name, 32, "resource%u", resource->ilId);
-    ilcSpvPutName(compiler->module, resource->id, name);
+    snprintf(name, 32, "uavResourceIndex%u", resource->ilId);
+    ilcSpvPutName(compiler->module, resource->resourceIndexId, name);
 
     compiler->uavResourceCount++;
     compiler->uavResources = realloc(compiler->uavResources,
@@ -356,7 +420,7 @@ static IlcSpvId loadSource(
         LOGE("Source or target type is/are have neither vector nor scalar type\n");
         return 0;
     }
-    IlcSpvId varId = ilcSpvPutLoad(compiler->module, reg->typeId, reg->id);
+    IlcSpvId varId = ilcSpvPutLoad(compiler->module, reg->typeId, reg->id, 0, NULL);
 
     if (sourceScalarTypeId != targetScalarTypeId) {
         // Convert scalar to float vector
@@ -504,7 +568,7 @@ static void storeDestination(
     if (dst->component[0] == IL_MODCOMP_NOWRITE || dst->component[1] == IL_MODCOMP_NOWRITE ||
         dst->component[2] == IL_MODCOMP_NOWRITE || dst->component[3] == IL_MODCOMP_NOWRITE) {
         // Select components from {dst.x, dst.y, dst.z, dst.w, x, y, z, w}
-        IlcSpvId origId = ilcSpvPutLoad(compiler->module, dstReg->typeId, dstReg->id);
+        IlcSpvId origId = ilcSpvPutLoad(compiler->module, dstReg->typeId, dstReg->id, 0, NULL);
 
         const IlcSpvWord components[] = {
             dst->component[0] == IL_MODCOMP_NOWRITE ? 0 : 4,
@@ -844,11 +908,82 @@ static IlcSpvId getVectorSampledTypeId(
     }
 }
 
+static unsigned findResourceIndex(
+    const GR_DESCRIPTOR_SET_MAPPING* mapping,
+    unsigned *outBuffer,
+    unsigned shaderResourceId,
+    GR_ENUM slotType)
+{
+    for (unsigned i = 0; i < mapping->descriptorCount; ++i) {
+        if (slotType == mapping->pDescriptorInfo[i].slotObjectType && shaderResourceId == mapping->pDescriptorInfo[i].shaderEntityIndex) {
+            outBuffer[0] = i;
+            return 1;
+        }
+        else if (mapping->pDescriptorInfo[i].slotObjectType == GR_SLOT_NEXT_DESCRIPTOR_SET) {
+            unsigned nestedLength = findResourceIndex(mapping->pDescriptorInfo[i].pNextLevelSet, outBuffer + 1, shaderResourceId, slotType);
+            if (nestedLength != 0xFFFFFFFF) {
+                outBuffer[0] = i;
+                return nestedLength + 1;
+            }
+        }
+    }
+    return 0xFFFFFFFF;
+}
+
+static IlcSpvId emitResourceIndexLoad(
+    IlcCompiler* compiler,
+    unsigned shaderResourceId,
+    GR_ENUM slotType)
+{
+    unsigned nestedIndices[128];
+    unsigned nestingCount;
+    unsigned descriptorIndex = 0;
+    for (unsigned i = 0; i < GR_MAX_DESCRIPTOR_SETS;++i) {
+        nestingCount = findResourceIndex(compiler->mappings + i, nestedIndices, shaderResourceId, slotType);
+        if (nestingCount != 0xFFFFFFFF) {
+            descriptorIndex = i;
+            break;
+        }
+    }
+    if (nestingCount == 0xFFFFFFFF) {
+        LOGE("failed to find remapping for resource %d", shaderResourceId);
+        return 0;
+    }
+    assert(nestingCount != 0);
+    if (compiler->zeroUintId == 0) {
+        compiler->zeroUintId = ilcSpvPutConstant(compiler->module, compiler->uintId, 0);
+    }
+    IlcSpvId descriptorIndexId = descriptorIndex == 0 ? compiler->zeroUintId : ilcSpvPutConstant(compiler->module, compiler->intId, descriptorIndex);
+    IlcSpvId args[2] = {compiler->zeroUintId, descriptorIndexId };
+    IlcSpvId pushItem = ilcSpvPutAccessChain(compiler->module, compiler->descriptorSetTypes.pushConstantsItemType, compiler->descriptorSetTypes.pushConstantsVariable, 2, args);
+    IlcSpvId descriptorItem = ilcSpvPutLoad(compiler->module, compiler->descriptorSetTypes.virtualDescriptorType, pushItem, 0, NULL);
+    IlcSpvId descriptorItemIndexId;
+    IlcSpvWord alignedParam[2] = {SpvMemoryAccessAlignedMask, 8};
+    // emit loading commands
+    for (unsigned i = 0; i < nestingCount; ++i) {
+        args[1] = ilcSpvPutConstant(compiler->module, compiler->uintId, nestedIndices[i]);
+        IlcSpvId itemPtr = ilcSpvPutAccessChain(compiler->module, compiler->descriptorSetTypes.uint64BufferPtrId, descriptorItem, 2, args);
+
+        descriptorItemIndexId  = ilcSpvPutLoad(compiler->module, compiler->uint64Id, itemPtr, 2, alignedParam);
+        if (i != nestingCount - 1) {
+            descriptorItem = ilcSpvPutConvertUToPtr(compiler->module, compiler->descriptorSetTypes.virtualDescriptorType, descriptorItemIndexId);
+        }
+    }
+    IlcSpvId varId = ilcSpvPutVariable(compiler->module,
+                                       ilcSpvPutPointerType(compiler->module, SpvStorageClassPrivate, compiler->uintId),
+                                       SpvStorageClassPrivate);
+    IlcSpvId descriptorItemUint = ilcSpvPutUConvert(compiler->module, compiler->uintId, descriptorItemIndexId);
+    // store the index variable
+    ilcSpvPutStore(compiler->module, varId, descriptorItemUint);
+    return varId;
+}
+
 static const IlcUavResource* createUavResource(
     IlcCompiler* compiler,
     uint8_t id,
     uint8_t type,
-    uint8_t fmtx)
+    uint8_t fmtx,
+    unsigned stride)
 {
     //just use unknown
     //TODO: check for atomic operations to emit image type
@@ -867,27 +1002,40 @@ static const IlcUavResource* createUavResource(
         LOGE("unsupported element format %X", fmtx);
         assert(false);
     }
+    IlcSpvId indexId = emitResourceIndexLoad(compiler, (unsigned)id, GR_SLOT_SHADER_UAV);
     IlcSpvId imageId = ilcSpvPutImageType(compiler->module, sampledTypeId, dim,
                                                     0 /*depth*/, isArrayed, isMultiSampled,
                                                     2 /*storage image*/,
                                           imageFormat/*, SpvAccessQualifierReadWrite*/);// just specify read write, it is possible to check for access type though or not write access type at all
-    IlcSpvId pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
+    const IlcUavResource* resourceTable = findUavResourceTable(compiler, imageId);
+    IlcSpvId pImageId, repoId;
+    if (resourceTable != NULL) {
+        pImageId = resourceTable->pTypeId;
+        repoId = resourceTable->repoId;
+    }
+    else {
+        pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
                                              imageId);
-    IlcSpvId resourceId = ilcSpvPutVariable(compiler->module, pImageId,
-                                            SpvStorageClassUniformConstant);
+        IlcSpvId arrayCounterId = ilcSpvPutTypeConstant(compiler->module, compiler->uintId, 10240);
+        IlcSpvId repoArrayType = ilcSpvPutArrayType(compiler->module, imageId, arrayCounterId);
+        IlcSpvId pRepoArrayType = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant, repoArrayType);
+        repoId = ilcSpvPutVariable(compiler->module, pRepoArrayType, SpvStorageClassUniformConstant);
 
+        IlcSpvWord descriptorSetIndex = 0;
+        IlcSpvWord descriptorSetBinding = (dim == SpvDimBuffer) ? TABLE_STORAGE_TEXEL_BUFFER : TABLE_STORAGE_IMAGE;
+        ilcSpvPutDecoration(compiler->module, repoId, SpvDecorationDescriptorSet, 1, &descriptorSetIndex);
+        ilcSpvPutDecoration(compiler->module, repoId, SpvDecorationBinding, 1, &descriptorSetBinding);
+        addResourceTable(compiler, repoId);
+    }
     ilcSpvPutName(compiler->module, imageId, "uav4Buffer");//TODO: replace name
 
-    IlcSpvWord descriptorSetIdx = compiler->kernel->shaderType;
-    ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationDescriptorSet,
-                        1, &descriptorSetIdx);
-    IlcSpvWord bindingIdx = id;
-    ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationBinding, 1, &bindingIdx);
     const IlcUavResource resource = {
-        .id = resourceId,
+        .resourceIndexId = indexId,
         .typeId = imageId,
+        .pTypeId = pImageId,
+        .repoId = repoId,
         .ilId = id,
-        .strideId = 0,
+        .strideId = stride == 0 ? 0 : ilcSpvPutConstant(compiler->module, compiler->uintId, stride),
         .ilType = type,
         .ilSampledType = fmtx,
     };
@@ -906,7 +1054,7 @@ static void emitUavResource(
     uint8_t id = GET_BITS(instr->control, 0, 3);
     uint8_t type = GET_BITS(instr->control, 8, 13);
     uint8_t fmtx = GET_BITS(instr->extras[0], 4, 7);
-    createUavResource(compiler, id, type, fmtx);
+    createUavResource(compiler, id, type, fmtx, 0);
 }
 
 static const IlcResource* createResource(
@@ -914,7 +1062,8 @@ static const IlcResource* createResource(
     uint8_t id,
     uint8_t type,
     const uint8_t imgFmt[4],
-    bool unnormalized)
+    bool unnormalized,
+    unsigned stride)
 {
     if (unnormalized) {
         LOGE("unhandled resource type %d %d - can't handle unnormalized image types\n", type, unnormalized);
@@ -932,34 +1081,61 @@ static const IlcResource* createResource(
         assert(false);
     }
 
+    IlcSpvId indexId = emitResourceIndexLoad(compiler, (unsigned)id, GR_SLOT_SHADER_RESOURCE);
+
     IlcSpvId imageId = ilcSpvPutImageType(compiler->module, sampledTypeId, dim,
                                           false /*depth*/, isArrayed, isMultiSampled, 1, imageFormat);
-    // unless sampled type is float, don't define an additional depth type
-    IlcSpvId depthImageId = sampledTypeId == compiler->floatId ? ilcSpvPutImageType(compiler->module, sampledTypeId, dim,
-                                                                                    true /*depth*/, isArrayed, isMultiSampled,
-                                                                                    1, imageFormat) : 0;
-    IlcSpvId pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
-                                             imageId);
-    IlcSpvId resourceId = ilcSpvPutVariable(compiler->module, pImageId,
-                                            SpvStorageClassUniformConstant);
+    const IlcResource* resourceTable = findResourceTable(compiler, imageId);
+
+    IlcSpvId depthImageId, pImageId, pDepthImageId, imageRepoId;
+    if (resourceTable != NULL) {
+        depthImageId = resourceTable->depthTypeId;
+        pDepthImageId = resourceTable->depthTypePtrId;
+        pImageId = resourceTable->imageTypePtrId;
+        imageRepoId = resourceTable->imageRepoId;
+    }
+    else {
+        ilcSpvPutName(compiler->module, imageId, "float4Buffer");
+        IlcSpvWord descriptorSetIndex = 0;
+        IlcSpvWord descriptorSetBinding = (dim == SpvDimBuffer) ? TABLE_UNIFORM_TEXEL_BUFFER : TABLE_SAMPLED_IMAGE;
+
+        IlcSpvId counterId = ilcSpvPutTypeConstant(compiler->module, compiler->uintId, 10240);
+        // unless sampled type is float, don't define an additional depth type
+        if (sampledTypeId == compiler->floatId) {
+            depthImageId = ilcSpvPutImageType(compiler->module, sampledTypeId, dim,
+                                              true /*depth*/, isArrayed, isMultiSampled,
+                                              1, imageFormat);
+            pDepthImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
+                                                 depthImageId);
+        }
+        else {
+            pDepthImageId = 0;
+            depthImageId = 0;
+        }
+        pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
+                                        imageId);
+        IlcSpvId imageRepoArrayType = ilcSpvPutArrayType(compiler->module, imageId, counterId);
+        IlcSpvId pImageRepoArrayType = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant, imageRepoArrayType);
+        imageRepoId = ilcSpvPutVariable(compiler->module, pImageRepoArrayType, SpvStorageClassUniformConstant);
+
+        ilcSpvPutDecoration(compiler->module, imageRepoId, SpvDecorationDescriptorSet, 1, &descriptorSetIndex);
+        ilcSpvPutDecoration(compiler->module, imageRepoId, SpvDecorationBinding, 1, &descriptorSetBinding);
+        addResourceTable(compiler, imageRepoId);
+    }
+
     if (dim == SpvDimBuffer) {
         ilcSpvPutCapability(compiler->module, SpvCapabilitySampledBuffer);
     }
 
-    ilcSpvPutName(compiler->module, imageId, "float4Buffer");//TODO: replace name
-
-    IlcSpvWord descriptorSetIdx = compiler->kernel->shaderType;
-    ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationDescriptorSet,
-                        1, &descriptorSetIdx);
-    IlcSpvWord bindingIdx = id;
-    ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationBinding, 1, &bindingIdx);
-
     const IlcResource resource = {
-        .id = resourceId,
+        .resourceIndexId = indexId,
         .typeId = imageId,
         .depthTypeId = depthImageId,
+        .imageTypePtrId = pImageId,
+        .depthTypePtrId = pDepthImageId,
+        .imageRepoId = imageRepoId,
         .ilId = id,
-        .strideId = 0,
+        .strideId = stride == 0 ? 0 : ilcSpvPutConstant(compiler->module, compiler->uintId, stride),
         .ilType = type,
         .ilSampledType = imgFmt[0],
     };
@@ -984,7 +1160,7 @@ static void emitResource(
     uint8_t fmtw = GET_BITS(instr->extras[0], 29, 31);
     uint8_t imgFmt[4] = {fmtx, fmty, fmtz, fmtw};
     LOGT("found resource %d %d\n", id, type, fmtx);
-    createResource(compiler, id, type, imgFmt, unnorm);
+    createResource(compiler, id, type, imgFmt, unnorm, 0);
 }
 
 static void emitRawSrv(
@@ -992,33 +1168,9 @@ static void emitRawSrv(
     const Instruction* instr)
 {
     uint16_t id = GET_BITS(instr->control, 0, 13);
+    uint8_t bufferFmt[4] = { IL_ELEMENTFORMAT_UINT, IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN};
 
-    IlcSpvId imageId = ilcSpvPutImageType(compiler->module, compiler->uintId, SpvDimBuffer,
-                                          0, 0, 0, 1, SpvImageFormatR32ui);
-    IlcSpvId pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
-                                             imageId);
-    IlcSpvId resourceId = ilcSpvPutVariable(compiler->module, pImageId,
-                                            SpvStorageClassUniformConstant);
-
-    ilcSpvPutCapability(compiler->module, SpvCapabilitySampledBuffer);
-    ilcSpvPutName(compiler->module, imageId, "rawSrv");
-
-    IlcSpvWord descriptorSetIdx = compiler->kernel->shaderType;
-    ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationDescriptorSet,
-                        1, &descriptorSetIdx);
-    IlcSpvWord bindingIdx = id;
-    ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationBinding, 1, &bindingIdx);
-
-    const IlcResource resource = {
-        .id = resourceId,
-        .typeId = imageId,
-        .depthTypeId = 0,// don't need depth here
-        .ilId = id,
-        .strideId = 0,
-        .ilSampledType = IL_ELEMENTFORMAT_UINT,
-    };
-
-    addResource(compiler, &resource);
+    createResource(compiler, id, IL_USAGE_PIXTEX_BUFFER, bufferFmt, false, 0);
 }
 
 static void emitRawUav(
@@ -1026,34 +1178,7 @@ static void emitRawUav(
     const Instruction* instr)
 {
     uint16_t id = GET_BITS(instr->control, 0, 13);
-
-    IlcSpvId imageId = ilcSpvPutImageType(compiler->module, compiler->uintId, SpvDimBuffer,
-                                          0, 0, 0, 2, SpvImageFormatR32ui);
-    IlcSpvId pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
-                                             imageId);
-    IlcSpvId resourceId = ilcSpvPutVariable(compiler->module, pImageId,
-                                            SpvStorageClassUniformConstant);
-
-    ilcSpvPutCapability(compiler->module, SpvCapabilityImageBuffer);
-    ilcSpvPutCapability(compiler->module, SpvCapabilitySampledBuffer);
-    ilcSpvPutName(compiler->module, imageId, "rawUav");
-
-    IlcSpvWord descriptorSetIdx = compiler->kernel->shaderType;
-    ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationDescriptorSet,
-                        1, &descriptorSetIdx);
-    IlcSpvWord bindingIdx = id;
-    ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationBinding, 1, &bindingIdx);
-
-    const IlcUavResource resource = {
-        .id = resourceId,
-        .typeId = imageId,
-        .ilId = id,
-        .strideId = 0,
-        .ilType = IL_USAGE_PIXTEX_BUFFER,
-        .ilSampledType = IL_ELEMENTFORMAT_UINT,
-    };
-
-    addUavResource(compiler, &resource);
+    createUavResource(compiler, id, IL_USAGE_PIXTEX_BUFFER, IL_ELEMENTFORMAT_UINT, 0);
 }
 
 static void emitStructuredSrv(
@@ -1061,33 +1186,9 @@ static void emitStructuredSrv(
     const Instruction* instr)
 {
     uint16_t id = GET_BITS(instr->control, 0, 13);
+    uint8_t bufferFmt[4] = { IL_ELEMENTFORMAT_UINT, IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN};
 
-    IlcSpvId imageId = ilcSpvPutImageType(compiler->module, compiler->uintId, SpvDimBuffer,
-                                          0, 0, 0, 1, SpvImageFormatR32ui);
-    IlcSpvId pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
-                                             imageId);
-    IlcSpvId resourceId = ilcSpvPutVariable(compiler->module, pImageId,
-                                            SpvStorageClassUniformConstant);
-
-    ilcSpvPutCapability(compiler->module, SpvCapabilitySampledBuffer);
-    ilcSpvPutName(compiler->module, imageId, "structSrv");
-
-    IlcSpvWord descriptorSetIdx = compiler->kernel->shaderType;
-    ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationDescriptorSet,
-                        1, &descriptorSetIdx);
-    IlcSpvWord bindingIdx = id;
-    ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationBinding, 1, &bindingIdx);
-
-    const IlcResource resource = {
-        .id = resourceId,
-        .typeId = imageId,
-        .depthTypeId = 0,// don't need depth here
-        .ilId = id,
-        .strideId = ilcSpvPutConstant(compiler->module, compiler->uintId, instr->extras[0]),
-        .ilSampledType = IL_ELEMENTFORMAT_UINT,
-    };
-
-    addResource(compiler, &resource);
+    createResource(compiler, id, IL_USAGE_PIXTEX_BUFFER, bufferFmt, false, instr->extras[0]);
 }
 
 static void emitStructuredUav(
@@ -1095,34 +1196,7 @@ static void emitStructuredUav(
     const Instruction* instr)
 {
     uint16_t id = GET_BITS(instr->control, 0, 13);
-
-    IlcSpvId imageId = ilcSpvPutImageType(compiler->module, compiler->uintId, SpvDimBuffer,
-                                          0, 0, 0, 2, SpvImageFormatR32ui);
-    IlcSpvId pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
-                                             imageId);
-    IlcSpvId resourceId = ilcSpvPutVariable(compiler->module, pImageId,
-                                            SpvStorageClassUniformConstant);
-
-    ilcSpvPutCapability(compiler->module, SpvCapabilityImageBuffer);
-    ilcSpvPutCapability(compiler->module, SpvCapabilitySampledBuffer);
-    ilcSpvPutName(compiler->module, imageId, "structUav");
-
-    IlcSpvWord descriptorSetIdx = compiler->kernel->shaderType;
-    ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationDescriptorSet,
-                        1, &descriptorSetIdx);
-    IlcSpvWord bindingIdx = id;
-    ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationBinding, 1, &bindingIdx);
-
-    const IlcUavResource resource = {
-        .id = resourceId,
-        .typeId = imageId,
-        .ilId = id,
-        .strideId = ilcSpvPutConstant(compiler->module, compiler->uintId, instr->extras[0]),
-        .ilType = IL_USAGE_PIXTEX_BUFFER,
-        .ilSampledType = IL_ELEMENTFORMAT_UINT,
-    };
-
-    addUavResource(compiler, &resource);
+    createUavResource(compiler, id, IL_USAGE_PIXTEX_BUFFER, IL_ELEMENTFORMAT_UINT, instr->extras[0]);
 }
 
 static void emitFunc(
@@ -1751,13 +1825,49 @@ static IlcSpvId emitOrGetSampler(
         return compiler->samplerResources[ilSamplerId];
     }
     if (compiler->samplerId == 0) {
+        IlcSpvId counterId = ilcSpvPutTypeConstant(compiler->module, compiler->uintId, 10240);
         compiler->samplerId = ilcSpvPutSamplerType(compiler->module);
+        compiler->samplerPtrId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant, compiler->samplerId);
+        IlcSpvId samplerRepoArrayType = ilcSpvPutArrayType(compiler->module, compiler->samplerId, counterId);
+        IlcSpvId pSamplerRepoArrayType = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant, samplerRepoArrayType);
+        compiler->samplerRepositoryId = ilcSpvPutVariable(compiler->module, pSamplerRepoArrayType, SpvStorageClassUniformConstant);
+
+        IlcSpvWord descriptorSetIndex = 0;
+        IlcSpvWord descriptorSetBinding = TABLE_SAMPLER;
+
+        ilcSpvPutDecoration(compiler->module, compiler->samplerRepositoryId, SpvDecorationDescriptorSet, 1, &descriptorSetIndex);
+        ilcSpvPutDecoration(compiler->module, compiler->samplerRepositoryId, SpvDecorationBinding, 1, &descriptorSetBinding);
     }
-    IlcSpvId pSamplerId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
-                                                 compiler->samplerId);
-    compiler->samplerResources[ilSamplerId] = ilcSpvPutVariable(compiler->module, pSamplerId,
-                                                               SpvStorageClassUniformConstant);
+    compiler->samplerResources[ilSamplerId] = emitResourceIndexLoad(compiler, (unsigned)ilSamplerId, GR_SLOT_SHADER_SAMPLER);
     return compiler->samplerResources[ilSamplerId];
+}
+
+static IlcSpvId emitUavResourceLoad(
+    IlcCompiler* compiler,
+    const IlcUavResource* resource)
+{
+    IlcSpvId indexId = ilcSpvPutLoad(compiler->module, compiler->uintId, resource->resourceIndexId, 0, NULL);
+    IlcSpvId resourcePtrId = ilcSpvPutAccessChain(compiler->module, resource->pTypeId, resource->repoId, 1, &indexId);
+    return ilcSpvPutLoad(compiler->module, resource->typeId, resourcePtrId, 0, NULL);
+}
+
+
+static IlcSpvId emitResourceLoad(
+    IlcCompiler* compiler,
+    const IlcResource* resource)
+{
+    IlcSpvId indexId = ilcSpvPutLoad(compiler->module, compiler->uintId, resource->resourceIndexId, 0, NULL);
+    IlcSpvId resourcePtrId = ilcSpvPutAccessChain(compiler->module, resource->imageTypePtrId, resource->imageRepoId, 1, &indexId);
+    return ilcSpvPutLoad(compiler->module, resource->typeId, resourcePtrId, 0, NULL);
+}
+
+static IlcSpvId emitSamplerLoad(
+    IlcCompiler* compiler,
+    IlcSpvId samplerIndex)
+{
+    IlcSpvId indexId = ilcSpvPutLoad(compiler->module, compiler->uintId, samplerIndex, 0, NULL);
+    IlcSpvId resourcePtrId = ilcSpvPutAccessChain(compiler->module, compiler->samplerPtrId, compiler->samplerRepositoryId, 1, &indexId);
+    return ilcSpvPutLoad(compiler->module, compiler->samplerId, resourcePtrId, 0, NULL);
 }
 
 
@@ -1886,7 +1996,7 @@ static void emitSample(
     if (resource == NULL && indexedArgs) {
         bool unnormalized = GET_BIT(instr->control, 15) ? (GET_BITS(instr->primModifier, 2, 3) == IL_TEXCOORDMODE_UNNORMALIZED) : false;
         uint8_t imgFmt[4] = {IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN};
-        resource = createResource(compiler, ilResourceId, instr->resourceFormat, imgFmt, unnormalized);
+        resource = createResource(compiler, ilResourceId, instr->resourceFormat, imgFmt, unnormalized, 0);
     }
 
     if (resource == NULL) {
@@ -2008,13 +2118,16 @@ static void emitSample(
         argCount++;
     }
     if (depthComparison && resource->depthTypeId == 0) {
-        LOGE("No depth type Id for resource %d provided\n", resource->id);
+        LOGE("No depth type Id for resource %d provided\n", resource->ilId);
         return;
     }
     IlcSpvId sampledImageTypeId = ilcSpvPutSampledImageType(compiler->module, depthComparison ? resource->depthTypeId : resource->typeId);
     IlcSpvId samplerResourceId = emitOrGetSampler(compiler, ilSamplerId);
-    IlcSpvId imageResourceId  = ilcSpvPutLoad(compiler->module, resource->typeId, resource->id);
-    IlcSpvId samplerId  = ilcSpvPutLoad(compiler->module, compiler->samplerId, samplerResourceId);
+
+    // load real resource
+    IlcSpvId imageResourceId = emitResourceLoad(compiler, resource);
+
+    IlcSpvId samplerId  = emitSamplerLoad(compiler, samplerResourceId);
     IlcSpvId sampledImageId = ilcSpvPutSampledImage(compiler->module, sampledImageTypeId, imageResourceId, samplerId);
     IlcSpvId sampleResultId = depthComparison ?
         ilcSpvPutImageSampleDref(
@@ -2057,7 +2170,7 @@ static void emitGather(
         bool unnormalized = GET_BIT(instr->control, 15) ? (GET_BITS(instr->primModifier, 2, 3) == IL_TEXCOORDMODE_UNNORMALIZED) : false;
         uint8_t imgFmt[4] = {IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN};
         //LAST is 14 so use 15, some compilers can generate extra bits for some reason (0x42 for 2D image, for example)
-        resource = createResource(compiler, ilResourceId, instr->resourceFormat & 15, imgFmt, unnormalized);
+        resource = createResource(compiler, ilResourceId, instr->resourceFormat & 15, imgFmt, unnormalized, 0);
     }
 
     if (resource == NULL) {
@@ -2157,14 +2270,16 @@ static void emitGather(
     }
 
     if (depthComparison && resource->depthTypeId == 0) {
-        LOGE("No depth type Id for resource %d provided\n", resource->id);
+        LOGE("No depth type Id for resource %d provided\n", resource->ilId);
         return;
     }
 
     IlcSpvId sampledImageTypeId = ilcSpvPutSampledImageType(compiler->module, depthComparison ? resource->depthTypeId : resource->typeId);
     IlcSpvId samplerResourceId = emitOrGetSampler(compiler, ilSamplerId);
-    IlcSpvId imageResourceId  = ilcSpvPutLoad(compiler->module, resource->typeId, resource->id);
-    IlcSpvId samplerId  = ilcSpvPutLoad(compiler->module, compiler->samplerId, samplerResourceId);
+    // load real resource
+    IlcSpvId imageResourceId = emitResourceLoad(compiler, resource);
+    // load sampler
+    IlcSpvId samplerId = emitSamplerLoad(compiler, samplerResourceId);
     IlcSpvId sampledImageId = ilcSpvPutSampledImage(compiler->module, sampledImageTypeId, imageResourceId, samplerId);
     IlcSpvId sampleResultId = depthComparison ?
         ilcSpvPutImageDrefGather(
@@ -2204,7 +2319,7 @@ static void emitLoad(
         bool unnormalized = GET_BIT(instr->control, 15) ? (GET_BITS(instr->primModifier, 2, 3) == IL_TEXCOORDMODE_UNNORMALIZED) : false;
         uint8_t imgFmt[4] = {IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN};
         //LAST is 14 so use 15, some compilers can generate extra bits for some reason (0x42 for 2D image, for example)
-        resource = createResource(compiler, ilResourceId, instr->resourceFormat, imgFmt, unnormalized);
+        resource = createResource(compiler, ilResourceId, instr->resourceFormat, imgFmt, unnormalized, 0);
     }
 
     if (resource == NULL) {
@@ -2274,7 +2389,9 @@ static void emitLoad(
     }
 
     IlcSpvId addressId = loadSource(compiler, &instr->srcs[0], mask, coordTypeId);
-    IlcSpvId resourceId = ilcSpvPutLoad(compiler->module, resource->typeId, resource->id);
+    // load real image
+    IlcSpvId resourceId = emitResourceLoad(compiler, resource);
+
     IlcSpvId fetchId = ilcSpvPutImageFetch(compiler->module, dstReg->typeId, resourceId, addressId, argMask, parameters);
     storeDestination(compiler, dst, fetchId);
 }
@@ -2292,7 +2409,7 @@ static void emitUavLoad(
         }
     }
     if (resource == NULL && indexedArgs) {
-        resource = createUavResource(compiler, ilResourceId, instr->resourceFormat, IL_ELEMENTFORMAT_UNKNOWN);
+        resource = createUavResource(compiler, ilResourceId, instr->resourceFormat, IL_ELEMENTFORMAT_UNKNOWN, 0);
     }
     if (resource == NULL) {
         LOGE("resource %d not found\n", ilResourceId);
@@ -2339,7 +2456,7 @@ static void emitUavLoad(
         return;
     }
     IlcSpvId coordId = loadSource(compiler, &instr->srcs[0], mask, coordTypeId);
-    IlcSpvId resourceId = ilcSpvPutLoad(compiler->module, resource->typeId, resource->id);
+    IlcSpvId resourceId = emitUavResourceLoad(compiler, resource);
     IlcSpvId sampledTypeId = getVectorSampledTypeId(compiler, resource->ilSampledType);
     IlcSpvId readId = ilcSpvPutImageRead(compiler->module, sampledTypeId, resourceId, coordId);
     if (dstReg->typeId != sampledTypeId) {
@@ -2457,27 +2574,8 @@ static void emitRawSrvLoad(
     const IlcResource* resource = findResource(compiler, ilResourceId);
 
     if (indexedResourceId && resource == NULL) {
-        ilcSpvPutCapability(compiler->module, SpvCapabilitySampledBuffer);
-        IlcSpvId imageId = ilcSpvPutImageType(compiler->module, compiler->uintId, SpvDimBuffer,
-                                              0 /*depth*/, false, false, 0, SpvImageFormatR32ui);
-        IlcSpvId pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
-                                                 imageId);
-        IlcSpvId resourceId = ilcSpvPutVariable(compiler->module, pImageId,
-                                                SpvStorageClassUniformConstant);
-        ilcSpvPutName(compiler->module, imageId, "uintSrvBuffer");
-        IlcSpvWord descriptorSetIdx = compiler->kernel->shaderType;
-        ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationDescriptorSet,
-                            1, &descriptorSetIdx);//TODO: replace descriptor sets
-        const IlcResource newResource = {
-            .id = resourceId,
-            .typeId = imageId,
-            .depthTypeId = 0,
-            .ilId = ilResourceId,
-            .ilType = instr->resourceFormat,
-            .ilSampledType = IL_ELEMENTFORMAT_UINT,
-        };
-
-        resource = addResource(compiler, &newResource);
+        uint8_t bufferFmt[4] = { IL_ELEMENTFORMAT_UINT, IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN};
+        resource = createResource(compiler, ilResourceId, IL_USAGE_PIXTEX_BUFFER, bufferFmt, false, 0);
     }
 
     if (resource == NULL) {
@@ -2496,7 +2594,8 @@ static void emitRawSrvLoad(
         srcId, ilcSpvPutConstant(compiler->module, compiler->intId, 4)
     };
     IlcSpvId addrId = ilcSpvPutAlu(compiler->module, SpvOpSDiv, compiler->intId, 2, divIds);
-    IlcSpvId resourceId = ilcSpvPutLoad(compiler->module, resource->typeId, resource->id);
+    // load real resource
+    IlcSpvId resourceId = emitResourceLoad(compiler, resource);
     // need to adjust fetched vector type to image sampled type
     IlcSpvId sampledTypeId = getVectorSampledTypeId(compiler, resource->ilSampledType);
     IlcSpvId scalarSampledTypeId = getScalarSampledTypeId(compiler, resource->ilSampledType);
@@ -2525,27 +2624,9 @@ static void emitStructuredSrvLoad(
     const IlcResource* resource = findResource(compiler, ilResourceId);
 
     if (indexedResourceId && resource == NULL) {
-        ilcSpvPutCapability(compiler->module, SpvCapabilitySampledBuffer);
-        IlcSpvId imageId = ilcSpvPutImageType(compiler->module, compiler->uintId, SpvDimBuffer,
-                                              0 /*depth*/, false, false, 0, SpvImageFormatR32ui);
-        IlcSpvId pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
-                                                 imageId);
-        IlcSpvId resourceId = ilcSpvPutVariable(compiler->module, pImageId,
-                                                SpvStorageClassUniformConstant);
-        ilcSpvPutName(compiler->module, imageId, "uint4Buffer");
-        IlcSpvWord descriptorSetIdx = compiler->kernel->shaderType;
-        ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationDescriptorSet,
-                            1, &descriptorSetIdx);//TODO: replace descriptor sets
-        const IlcResource newResource = {
-            .id = resourceId,
-            .typeId = imageId,
-            .depthTypeId = 0,// don't need depth type here
-            .ilId = ilResourceId,
-            .ilType = instr->resourceFormat,
-            .ilSampledType = IL_ELEMENTFORMAT_UINT,
-        };
-
-        resource = addResource(compiler, &newResource);
+        //TODO: move this to generic function to avoid duplicates
+        uint8_t bufferFmt[4] = { IL_ELEMENTFORMAT_UINT, IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN, IL_ELEMENTFORMAT_UNKNOWN};
+        resource = createResource(compiler, ilResourceId, IL_USAGE_PIXTEX_BUFFER, bufferFmt, false, 0);
     }
 
     if (resource == NULL) {
@@ -2563,7 +2644,8 @@ static void emitStructuredSrvLoad(
 
     IlcSpvId srcId  = loadSource(compiler, &instr->srcs[0], COMP_MASK_XY, ilcSpvPutVectorType(compiler->module, compiler->intId, 2));
     IlcSpvId addressId = emitStructIndexCalculation(compiler, srcId, resource->strideId, compiler->intId);
-    IlcSpvId resourceId = ilcSpvPutLoad(compiler->module, resource->typeId, resource->id);
+    // load real resource
+    IlcSpvId resourceId = emitResourceLoad(compiler, resource);
 
     IlcSpvId sampledTypeId = getVectorSampledTypeId(compiler, resource->ilSampledType);
     IlcSpvId scalarSampledTypeId = getScalarSampledTypeId(compiler, resource->ilSampledType);
@@ -2592,28 +2674,8 @@ static void emitRawUavLoad(
     }
     const IlcUavResource* resource = findUavResource(compiler, ilResourceId);
 
-    if (indexedResourceId && resource == NULL) {
-        ilcSpvPutCapability(compiler->module, SpvCapabilitySampledBuffer);
-        ilcSpvPutCapability(compiler->module, SpvCapabilityImageBuffer);
-        IlcSpvId imageId = ilcSpvPutImageType(compiler->module, compiler->uintId, SpvDimBuffer,
-                                              0 /*depth*/, false, false, 2, SpvImageFormatR32ui);
-        IlcSpvId pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
-                                                 imageId);
-        IlcSpvId resourceId = ilcSpvPutVariable(compiler->module, pImageId,
-                                                SpvStorageClassUniformConstant);
-        ilcSpvPutName(compiler->module, imageId, "uintUavBuffer");
-        IlcSpvWord descriptorSetIdx = compiler->kernel->shaderType;
-        ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationDescriptorSet,
-                            1, &descriptorSetIdx);//TODO: replace descriptor sets
-        const IlcUavResource newResource = {
-            .id = resourceId,
-            .typeId = imageId,
-            .ilId = ilResourceId,
-            .ilType = instr->resourceFormat,
-            .ilSampledType = IL_ELEMENTFORMAT_UINT,
-        };
-
-        resource = addUavResource(compiler, &newResource);
+    if (indexedResourceId && resource == NULL) {//TODO: check if OpLoad from this produces valid spirv code
+        resource = createUavResource(compiler, ilResourceId, IL_USAGE_PIXTEX_BUFFER, IL_ELEMENTFORMAT_UINT, 0);
     }
 
     if (resource == NULL) {
@@ -2632,7 +2694,7 @@ static void emitRawUavLoad(
         srcId, ilcSpvPutConstant(compiler->module, compiler->intId, 4)
     };
     IlcSpvId addrId = ilcSpvPutAlu(compiler->module, SpvOpSDiv, compiler->intId, 2, divIds);
-    IlcSpvId resourceId = ilcSpvPutLoad(compiler->module, resource->typeId, resource->id);
+    IlcSpvId resourceId = emitUavResourceLoad(compiler, resource);
     // need to adjust fetched vector type to image sampled type
     IlcSpvId sampledTypeId = getVectorSampledTypeId(compiler, resource->ilSampledType);
     IlcSpvId scalarSampledTypeId = getScalarSampledTypeId(compiler, resource->ilSampledType);
@@ -2669,7 +2731,7 @@ static void emitStructuredUavLoad(
 
     IlcSpvId srcId  = loadSource(compiler, &instr->srcs[0], COMP_MASK_XY, ilcSpvPutVectorType(compiler->module, compiler->intId, 2));
     IlcSpvId addressId = emitStructIndexCalculation(compiler, srcId, resource->strideId, compiler->intId);
-    IlcSpvId resourceId = ilcSpvPutLoad(compiler->module, resource->typeId, resource->id);
+    IlcSpvId resourceId = emitUavResourceLoad(compiler, resource);
 
     IlcSpvId sampledTypeId = getVectorSampledTypeId(compiler, resource->ilSampledType);
     IlcSpvId scalarSampledTypeId = getScalarSampledTypeId(compiler, resource->ilSampledType);
@@ -2699,7 +2761,7 @@ static void emitUavStore(
         }
     }
     if (resource == NULL && indexedArgs) {
-        resource = createUavResource(compiler, ilResourceId, instr->resourceFormat, IL_ELEMENTFORMAT_UNKNOWN);
+        resource = createUavResource(compiler, ilResourceId, instr->resourceFormat, IL_ELEMENTFORMAT_UNKNOWN, 0);
     }
     if (resource == NULL) {
         LOGE("resource %d not found\n", ilResourceId);
@@ -2740,7 +2802,7 @@ static void emitUavStore(
         return;
     }
     IlcSpvId coordId = loadSource(compiler, &instr->srcs[0], mask, coordTypeId);
-    IlcSpvId resourceId = ilcSpvPutLoad(compiler->module, resource->typeId, resource->id);
+    IlcSpvId resourceId = emitUavResourceLoad(compiler, resource);
     IlcSpvId sampledTypeId = getVectorSampledTypeId(compiler, resource->ilSampledType);
     IlcSpvId valueId = loadSource(compiler, &instr->srcs[1], COMP_MASK_XYZW, sampledTypeId);
     ilcSpvPutImageWrite(compiler->module, resourceId, coordId, valueId);
@@ -2760,27 +2822,7 @@ static void emitRawUavStore(
     const IlcUavResource* resource = findUavResource(compiler, ilResourceId);
 
     if (indexedResourceId && resource == NULL) {
-        ilcSpvPutCapability(compiler->module, SpvCapabilitySampledBuffer);
-        ilcSpvPutCapability(compiler->module, SpvCapabilityImageBuffer);
-        IlcSpvId imageId = ilcSpvPutImageType(compiler->module, compiler->uintId, SpvDimBuffer,
-                                              0 /*depth*/, false, false, 2, SpvImageFormatR32ui);
-        IlcSpvId pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
-                                                 imageId);
-        IlcSpvId resourceId = ilcSpvPutVariable(compiler->module, pImageId,
-                                                SpvStorageClassUniformConstant);
-        ilcSpvPutName(compiler->module, imageId, "uintUavBuffer");
-        IlcSpvWord descriptorSetIdx = compiler->kernel->shaderType;
-        ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationDescriptorSet,
-                            1, &descriptorSetIdx);//TODO: replace descriptor sets
-        const IlcUavResource newResource = {
-            .id = resourceId,
-            .typeId = imageId,
-            .ilId = ilResourceId,
-            .ilType = instr->resourceFormat,
-            .ilSampledType = IL_ELEMENTFORMAT_UINT,
-        };
-
-        resource = addUavResource(compiler, &newResource);
+        resource = createUavResource(compiler, ilResourceId, IL_USAGE_PIXTEX_BUFFER, IL_ELEMENTFORMAT_UINT, 0);
     }
 
     if (resource == NULL) {
@@ -2795,7 +2837,7 @@ static void emitRawUavStore(
         srcId, ilcSpvPutConstant(compiler->module, compiler->intId, 4)
     };
     IlcSpvId addrId = ilcSpvPutAlu(compiler->module, SpvOpSDiv, compiler->intId, 2, divIds);
-    IlcSpvId resourceId = ilcSpvPutLoad(compiler->module, resource->typeId, resource->id);
+    IlcSpvId resourceId = emitUavResourceLoad(compiler, resource);
     // need to adjust fetched vector type to image sampled type
 
     IlcSpvId scalarSampledTypeId = getScalarSampledTypeId(compiler, resource->ilSampledType);
@@ -2822,7 +2864,7 @@ static void emitStructuredUavStore(
     IlcSpvId srcId  = loadSource(compiler, &instr->srcs[0], COMP_MASK_XY, ilcSpvPutVectorType(compiler->module, compiler->intId, 2));
     IlcSpvId valueId = loadSource(compiler, &instr->srcs[1], COMP_MASK_XYZW, sampledTypeId);
     IlcSpvId addressId = emitStructIndexCalculation(compiler, srcId, resource->strideId, compiler->intId);
-    IlcSpvId resourceId = ilcSpvPutLoad(compiler->module, resource->typeId, resource->id);
+    IlcSpvId resourceId = emitUavResourceLoad(compiler, resource);
 
     IlcSpvId scalarSampledTypeId = getScalarSampledTypeId(compiler, resource->ilSampledType);
     emitBufferStore(compiler,
@@ -3044,32 +3086,38 @@ static void emitEntryPoint(
             samplerCount++;
         }
     }
-
-    unsigned interfaceCount = compiler->regCount + compiler->resourceCount + compiler->uavResourceCount + samplerCount;
+    unsigned interfaceCount = 1 + (compiler->samplerRepositoryId != 0) + compiler->regCount + compiler->resourceRepoCount + compiler->uavResourceCount + compiler->resourceCount + samplerCount;
+    // adjust to push constant for virtual descriptor set
     IlcSpvWord* interfaces = malloc(sizeof(IlcSpvWord) * interfaceCount);
+    unsigned interfaceIndex = 0;
     for (int i = 0; i < compiler->regCount; i++) {
         const IlcRegister* reg = &compiler->regs[i];
 
-        interfaces[i] = reg->id;
+        interfaces[interfaceIndex++] = reg->id;
     }
 
+    for (int i = 0; i < compiler->resourceRepoCount; i++) {
+        interfaces[interfaceIndex++] = compiler->resourceRepositories[i];
+    }
+    if (compiler->samplerRepositoryId != 0) {
+        interfaces[interfaceIndex++] = compiler->samplerRepositoryId;
+    }
     for (int i = 0; i < compiler->resourceCount; i++) {
         const IlcResource* resource = &compiler->resources[i];
-
-        interfaces[compiler->regCount + i] = resource->id;
+        interfaces[interfaceIndex++] = resource->resourceIndexId;
     }
     for (int i = 0; i < compiler->uavResourceCount; i++) {
         const IlcUavResource* resource = &compiler->uavResources[i];
-        interfaces[compiler->regCount + compiler->resourceCount + i] = resource->id;
+        interfaces[interfaceIndex++] = resource->resourceIndexId;
     }
-    unsigned intIndex = compiler->regCount + compiler->resourceCount + compiler->uavResourceCount;
     for (int i = 0; i < 16; i++) {
         if (compiler->samplerResources[i] != 0) {
-            interfaces[intIndex++] = compiler->samplerResources[i];
+            interfaces[interfaceIndex++] = compiler->samplerResources[i];
         }
     }
+    interfaces[interfaceIndex++] = compiler->descriptorSetTypes.pushConstantsVariable;
     ilcSpvPutEntryPoint(compiler->module, compiler->entryPointId, execution, name,
-                        interfaceCount, interfaces);
+                        interfaceIndex, interfaces);
     ilcSpvPutName(compiler->module, compiler->entryPointId, name);
 
     switch (compiler->kernel->shaderType) {
@@ -3084,16 +3132,48 @@ static void emitEntryPoint(
 
 uint32_t* ilcCompileKernel(
     unsigned* size,
+    const GR_DESCRIPTOR_SET_MAPPING* mappings,
     const Kernel* kernel)
 {
     IlcSpvModule module;
 
     ilcSpvInit(&module);
 
-    IlcSpvId intId = ilcSpvPutIntType(&module, true);
-    IlcSpvId uintId = ilcSpvPutIntType(&module, true);
+    IlcSpvId intId = ilcSpvPutIntType(&module, 32, true);
+    IlcSpvId uintId = ilcSpvPutIntType(&module, 32, false);
     IlcSpvId floatId = ilcSpvPutFloatType(&module);
     IlcSpvId boolId = ilcSpvPutBoolType(&module);
+
+    IlcSpvId uint64Id = ilcSpvPutIntType(&module, 64, false);
+    IlcSpvId uint64PtrId = ilcSpvPutPointerType(&module, SpvStorageClassPrivate, uint64Id);
+    IlcSpvId uint64BufferPtrId = ilcSpvPutPointerType(&module, SpvStorageClassPhysicalStorageBuffer, uint64Id);
+
+    // initialize struct for push constants
+    const unsigned descriptorIndexStride = 8;
+    const unsigned memberOffset = 0;
+    IlcSpvId descriptorPtrArray = ilcSpvPutRuntimeArrayType(&module, uint64Id);
+    ilcSpvPutDecoration(&module, descriptorPtrArray, SpvDecorationArrayStride, 1, &descriptorIndexStride);
+    IlcSpvId virtualDescriptorSetType = ilcSpvPutStructType(&module, 1, &descriptorPtrArray);
+    ilcSpvPutName(&module, virtualDescriptorSetType, "VirtualDescriptorSet");
+    ilcSpvPutDecoration(&module, virtualDescriptorSetType, SpvDecorationBlock, 0, NULL);
+    ilcSpvPutMemberDecoration(&module, virtualDescriptorSetType, 0, SpvDecorationOffset, 1, &memberOffset);
+    IlcSpvId virtualDescriptorSetTypePtr = ilcSpvPutPointerType(&module, SpvStorageClassPhysicalStorageBuffer, virtualDescriptorSetType);
+
+    IlcSpvId pushConstantInnerFieldPtrType = ilcSpvPutPointerType(&module, SpvStorageClassPushConstant, virtualDescriptorSetTypePtr);
+
+    IlcSpvId virtualDescriptorSetCount = ilcSpvPutTypeConstant(&module, uintId, 2);// since mantle supports 2 descriptor sets at once
+
+    IlcSpvId vDescSetPhysicalStorageBufferPtr = ilcSpvPutArrayType(&module, virtualDescriptorSetTypePtr, virtualDescriptorSetCount);
+
+    ilcSpvPutDecoration(&module, vDescSetPhysicalStorageBufferPtr, SpvDecorationArrayStride, 1, &descriptorIndexStride);
+
+    IlcSpvId pushConstantsDescSetsTypeId = ilcSpvPutStructType(&module, 1, &vDescSetPhysicalStorageBufferPtr);
+    ilcSpvPutDecoration(&module, pushConstantsDescSetsTypeId, SpvDecorationBlock, 0, NULL);
+    ilcSpvPutMemberDecoration(&module, pushConstantsDescSetsTypeId, 0, SpvDecorationOffset, 1, &memberOffset);
+    ilcSpvPutName(&module, pushConstantsDescSetsTypeId, "VirtualDescriptorSetsPushConstant");
+    IlcSpvId pushConstantsDescSetsPtrId  = ilcSpvPutPointerType(&module, SpvStorageClassPushConstant, pushConstantsDescSetsTypeId);
+    IlcSpvId pushConstantsVarId = ilcSpvPutVariable(&module, pushConstantsDescSetsPtrId, SpvStorageClassPushConstant);
+    ilcSpvPutName(&module, pushConstantsVarId, "virtualDescriptorSets");
 
     IlcCompiler compiler = {
         .module = &module,
@@ -3105,12 +3185,25 @@ uint32_t* ilcCompileKernel(
         .float4Id = ilcSpvPutVectorType(&module, floatId, 4),
         .uintId = uintId,
         .uint4Id = ilcSpvPutVectorType(&module, uintId, 4),
+        .uint64Id = uint64Id,
+        .uint64PtrId = uint64PtrId,
         .zeroUintId = 0,//lazy
         .boolId = boolId,
         .bool4Id = ilcSpvPutVectorType(&module, boolId, 4),
         .samplerId = 0,
+        .samplerPtrId = 0,
+        .samplerRepositoryId = 0,
+        .descriptorSetTypes = {
+            .uint64BufferPtrId = uint64BufferPtrId,
+            .pushConstantsVariable = pushConstantsVarId,
+            .pushConstantsItemType = pushConstantInnerFieldPtrType,
+            .virtualDescriptorType = virtualDescriptorSetTypePtr,
+        },
+        .mappings = mappings,
         .regCount = 0,
         .regs = NULL,
+        .resourceRepoCount = 0,
+        .resourceRepositories = NULL,
         .resourceCount = 0,
         .resources = NULL,
         .uavResourceCount = 0,

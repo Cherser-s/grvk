@@ -39,10 +39,14 @@ GR_RESULT grCreateCommandBuffer(
     GrCmdBuffer* grCmdBuffer = malloc(sizeof(GrCmdBuffer));
     *grCmdBuffer = (GrCmdBuffer) {
         .sType = GR_STRUCT_TYPE_COMMAND_BUFFER,
+        .grDevice = grDevice,
         .commandBuffer = vkCommandBuffer,
         .timestampQueryPool = VK_NULL_HANDLE,
         .grPipeline = NULL,
-        .grDescriptorSet = NULL,
+        .graphicsDescriptorSets = {NULL, NULL},
+        .graphicsDescriptorSetOffsets = {0, 0},
+        .computeDescriptorSets = {NULL, NULL},
+        .computeDescriptorSetOffsets = {0, 0},
         .attachmentCount = 0,
         .attachments = { NULL },
         .minExtent2D = { 0, 0 },
