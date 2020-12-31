@@ -3,12 +3,12 @@
 #include "mantle_wsi.h"
 #include <assert.h>
 
-static uint32_t
+static unsigned
 select_memory_type(const VkPhysicalDeviceMemoryProperties *memProps,
                    VkMemoryPropertyFlags props,
-                   uint32_t type_bits)
+                   unsigned type_bits)
 {
-    for (uint32_t i = 0; i < memProps->memoryTypeCount; i++) {
+    for (unsigned i = 0; i < memProps->memoryTypeCount; i++) {
         const VkMemoryType type = memProps->memoryTypes[i];
         if ((type_bits & (1 << i)) && (type.propertyFlags & props) == props)
             return i;
@@ -21,14 +21,14 @@ select_memory_type(const VkPhysicalDeviceMemoryProperties *memProps,
 #endif
 }
 
-static uint32_t
+static unsigned
 select_preferred_memory_type(const VkPhysicalDeviceMemoryProperties *memProps,
                              VkMemoryPropertyFlags preferredProps,
                              VkMemoryPropertyFlags props,
-                             uint32_t type_bits)
+                             unsigned type_bits)
 {
-    uint32_t requiredType = 0xFFFFFFFFu;
-    for (uint32_t i = 0; i < memProps->memoryTypeCount; i++) {
+    unsigned requiredType = 0xFFFFFFFFu;
+    for (unsigned i = 0; i < memProps->memoryTypeCount; i++) {
         const VkMemoryType type = memProps->memoryTypes[i];
         if ((type_bits & (1 << i)) && (type.propertyFlags & preferredProps) == preferredProps)
             return i;
@@ -46,8 +46,8 @@ select_preferred_memory_type(const VkPhysicalDeviceMemoryProperties *memProps,
 #endif
 }
 
-static inline uint32_t
-align_u32(uint32_t v, uint32_t a)
+static inline unsigned
+align_u32(unsigned v, unsigned a)
 {
     assert(a != 0 && a == (a & -a));
     return (v + a - 1) & ~(a - 1);
@@ -59,7 +59,7 @@ static VkResult buildCopyCommandBuffer(
     VkImage srcImage,
     VkExtent2D srcExtent,
     VkBuffer dstBuffer,
-    uint32_t rowLengthTexels,
+    unsigned rowLengthTexels,
     VkCommandBuffer *pCmdBuf)
 {
     VkCommandBuffer cmdBuf = VK_NULL_HANDLE;
@@ -139,7 +139,7 @@ static const VkFormat WSI_WINDOWS_FORMATS[] = {
     VK_FORMAT_B8G8R8_UNORM,
 };
 
-static const uint32_t WSI_WINDOWS_FORMATS_PIXEL_SIZE[] = {4, 2, 2, 2, 2, 2, 4, 3};
+static const unsigned WSI_WINDOWS_FORMATS_PIXEL_SIZE[] = {4, 2, 2, 2, 2, 2, 4, 3};
 static const DWORD WSI_WINDOWS_BITMASK_FORMATS_MASK[][4] = {
     {0x000000FF,0x0000FF00,0x00FF0000,0},//in case of 32 bits Windows expects layout to be BGR instead of RGB in case of 16 bits
     //{0b0111110000000000, 0b0000001111100000, 0b0000000000011111, 0},//ARGB
@@ -153,7 +153,7 @@ static const DWORD WSI_WINDOWS_BITMASK_FORMATS_MASK[][4] = {
 };
 static const size_t FORMATS_SIZE = sizeof(WSI_WINDOWS_FORMATS) / sizeof(VkFormat);
 static const size_t FORMATS_MASKS_SIZE = sizeof(WSI_WINDOWS_BITMASK_FORMATS_MASK) / sizeof(DWORD) / 4;
-void wsiPresentBufferToHWND(HWND hwnd, void* img_buffer, VkExtent3D dstExtent, uint32_t rowPitchTexels, uint32_t bufferLength, VkFormat format)
+void wsiPresentBufferToHWND(HWND hwnd, void* img_buffer, VkExtent3D dstExtent, unsigned rowPitchTexels, unsigned bufferLength, VkFormat format)
 {
     BYTE bm_info_bytes[sizeof(BITMAPINFO) + 4];
     BITMAPINFO* bm_info = (BITMAPINFO*)bm_info_bytes;
@@ -175,7 +175,7 @@ void wsiPresentBufferToHWND(HWND hwnd, void* img_buffer, VkExtent3D dstExtent, u
         .bmiColors = {}
     };
 
-    for (uint32_t i = 0; i < FORMATS_SIZE;++i) {
+    for (unsigned i = 0; i < FORMATS_SIZE;++i) {
         if (format == WSI_WINDOWS_FORMATS[i]) {
             bm_info->bmiHeader.biBitCount = WSI_WINDOWS_FORMATS_PIXEL_SIZE[i] * 8;//adjust to bits
             if (i < FORMATS_MASKS_SIZE) {
@@ -234,8 +234,8 @@ GR_RESULT grWsiWinCreatePresentableImage(
 
     VkFormat format = getVkFormat(pCreateInfo->format);
 
-    uint32_t bytesPerPixel = 0;
-    for (uint32_t i = 0; i < FORMATS_SIZE;++i) {
+    unsigned bytesPerPixel = 0;
+    for (unsigned i = 0; i < FORMATS_SIZE;++i) {
         if (format == WSI_WINDOWS_FORMATS[i]) {
             bytesPerPixel = WSI_WINDOWS_FORMATS_PIXEL_SIZE[i];
         }
@@ -291,8 +291,8 @@ GR_RESULT grWsiWinCreatePresentableImage(
         goto create_fail;
     }
 
-    const uint32_t rowPitchSize = align_u32(pCreateInfo->extent.width, 256);//TODO: calculate this
-    const uint32_t bufferSize = align_u32(rowPitchSize * bytesPerPixel * pCreateInfo->extent.height, 4096);
+    const unsigned rowPitchSize = align_u32(pCreateInfo->extent.width, 256);//TODO: calculate this
+    const unsigned bufferSize = align_u32(rowPitchSize * bytesPerPixel * pCreateInfo->extent.height, 4096);
     //create buffer to copy
     const VkBufferCreateInfo bufCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,

@@ -616,7 +616,7 @@ VkColorComponentFlags getVkColorComponentFlags(
 }
 
 VkShaderStageFlags getVkShaderStageFlags(
-    uint32_t stageIndex)
+    unsigned stageIndex)
 {
     switch (stageIndex) {
     case 0:

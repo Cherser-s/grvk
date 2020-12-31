@@ -55,11 +55,11 @@ typedef struct {
     Token secModifier;
     Token resourceFormat;
     Token addressOffset;
-    uint32_t dstCount;
+    unsigned dstCount;
     Destination* dsts;
-    uint32_t srcCount;
+    unsigned srcCount;
     Source* srcs;
-    uint32_t extraCount;
+    unsigned extraCount;
     Token* extras;
 } Instruction;
 
@@ -70,7 +70,7 @@ typedef struct {
     uint8_t shaderType;
     bool multipass;
     bool realtime;
-    uint32_t instrCount;
+    unsigned instrCount;
     Instruction* instrs;
 } Kernel;
 
@@ -78,14 +78,14 @@ extern const char* mIlShaderTypeNames[IL_SHADER_LAST];
 
 Kernel* ilcDecodeStream(
     const Token* tokens,
-    uint32_t count);
+    unsigned count);
 
 void ilcDumpKernel(
     FILE* file,
     const Kernel* kernel);
 
 uint32_t* ilcCompileKernel(
-    uint32_t* size,
+    unsigned* size,
     const Kernel* kernel);
 
 #endif // AMDILC_INTERNAL_H_

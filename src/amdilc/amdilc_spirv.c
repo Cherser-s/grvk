@@ -5,7 +5,7 @@
 #endif
 #define BUFFER_ALLOC_THRESHOLD 64
 
-static uint32_t strlenw(
+static unsigned strlenw(
     const char* str)
 {
     // String length in words, including \0
@@ -100,7 +100,7 @@ bool ilcSpvBeginInsertion(IlcSpvModule* module, uint32_t newPtr) {
     }
 }
 
-uint32_t getSpvTypeComponentCount(
+unsigned getSpvTypeComponentCount(
     IlcSpvModule* module,
     IlcSpvId typeId,
     IlcSpvId *outScalarTypeId)
@@ -507,7 +507,7 @@ IlcSpvId ilcSpvPutImageGather(
 {
     IlcSpvBuffer* buffer = &module->buffer[ID_CODE];
     IlcSpvId id = ilcSpvAllocId(module);
-    uint32_t operandCount;
+    unsigned operandCount;
 #ifdef _MSC_VER
     operandCount = __popcnt(argMask);
 #else
@@ -522,7 +522,7 @@ IlcSpvId ilcSpvPutImageGather(
     if (operandCount > 0) {
         putWord(buffer, argMask);
     }
-    for (uint32_t i = 0; i < operandCount; ++i) {
+    for (unsigned i = 0; i < operandCount; ++i) {
         putWord(buffer, operands[i]);
     }
     return id;
@@ -539,7 +539,7 @@ IlcSpvId ilcSpvPutImageDrefGather(
 {
     IlcSpvBuffer* buffer = &module->buffer[ID_CODE];
     IlcSpvId id = ilcSpvAllocId(module);
-    uint32_t operandCount;
+    unsigned operandCount;
 #ifdef _MSC_VER
     operandCount = __popcnt(argMask);
 #else
@@ -554,7 +554,7 @@ IlcSpvId ilcSpvPutImageDrefGather(
     if (operandCount > 0) {
         putWord(buffer, argMask);
     }
-    for (uint32_t i = 0; i < operandCount; ++i) {
+    for (unsigned i = 0; i < operandCount; ++i) {
         putWord(buffer, operands[i]);
     }
     return id;
@@ -570,7 +570,7 @@ IlcSpvId ilcSpvPutImageSample(
 {
     IlcSpvBuffer* buffer = &module->buffer[ID_CODE];
     IlcSpvId id = ilcSpvAllocId(module);
-    uint32_t operandCount;
+    unsigned operandCount;
 #ifdef _MSC_VER
     operandCount = __popcnt(argMask);
 #else
@@ -589,7 +589,7 @@ IlcSpvId ilcSpvPutImageSample(
     if (operandCount > 0) {
         putWord(buffer, argMask);
     }
-    for (uint32_t i = 0; i < operandCount; ++i) {
+    for (unsigned i = 0; i < operandCount; ++i) {
         putWord(buffer, operands[i]);
     }
     return id;
@@ -606,7 +606,7 @@ IlcSpvId ilcSpvPutImageSampleDref(
 {
     IlcSpvBuffer* buffer = &module->buffer[ID_CODE];
     IlcSpvId id = ilcSpvAllocId(module);
-    uint32_t operandCount;
+    unsigned operandCount;
 #ifdef _MSC_VER
     operandCount = __popcnt(argMask);
 #else
@@ -626,7 +626,7 @@ IlcSpvId ilcSpvPutImageSampleDref(
     if (operandCount > 0) {
         putWord(buffer, argMask);
     }
-    for (uint32_t i = 0; i < operandCount; ++i) {
+    for (unsigned i = 0; i < operandCount; ++i) {
         putWord(buffer, operands[i]);
     }
     return id;
@@ -853,7 +853,7 @@ IlcSpvId ilcSpvPutImageFetch(
     const IlcSpvId* operands)
 {
     IlcSpvBuffer* buffer = &module->buffer[ID_CODE];
-    uint32_t operandCount;
+    unsigned operandCount;
 #ifdef _MSC_VER
     operandCount = __popcnt(argMask);
 #else
@@ -868,7 +868,7 @@ IlcSpvId ilcSpvPutImageFetch(
     if (operandCount > 0) {
         putWord(buffer, argMask);
     }
-    for (uint32_t i = 0; i < operandCount; ++i) {
+    for (unsigned i = 0; i < operandCount; ++i) {
         putWord(buffer, operands[i]);
     }
     return id;
@@ -991,7 +991,7 @@ void ilcSpvPutSwitch(
     IlcSpvModule* module,
     IlcSpvId selectorId,
     IlcSpvId defaultLabelId,
-    uint32_t caseSize,
+    unsigned caseSize,
     const IlcSpvSwitchCase* cases)
 {
     IlcSpvBuffer* buffer = &module->buffer[ID_CODE];
@@ -999,7 +999,7 @@ void ilcSpvPutSwitch(
     putInstr(buffer, SpvOpSwitch, 3 + caseSize * 2);
     putWord(buffer, selectorId);
     putWord(buffer, defaultLabelId);
-    for (uint32_t i = 0; i < caseSize; ++i) {
+    for (unsigned i = 0; i < caseSize; ++i) {
         putWord(buffer, cases[i].literal);
         putWord(buffer, cases[i].label);
     }

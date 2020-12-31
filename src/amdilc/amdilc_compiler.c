@@ -3083,7 +3083,7 @@ static void emitEntryPoint(
 }
 
 uint32_t* ilcCompileKernel(
-    uint32_t* size,
+    unsigned* size,
     const Kernel* kernel)
 {
     IlcSpvModule module;

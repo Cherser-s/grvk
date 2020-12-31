@@ -9,7 +9,7 @@ typedef struct _GrWsiImage {
     GrDevice* device;
     VkImage image;
     VkExtent3D extent;
-    uint32_t layerCount;
+    unsigned layerCount;
     VkFormat format;
     VkDeviceMemory imageMemory;
 

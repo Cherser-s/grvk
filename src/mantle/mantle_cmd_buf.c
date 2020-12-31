@@ -14,65 +14,27 @@ static VkImageSubresourceRange getVkImageSubresourceRange(
     };
 }
 
-static VkExtent3D getMinimumExtent(
-    unsigned colorTargetCount,
-    const GR_COLOR_TARGET_BIND_INFO* colorTargets,
-    const GR_DEPTH_STENCIL_BIND_INFO* depthTarget)
-{
-    VkExtent3D extent = { UINT32_MAX, UINT32_MAX, UINT32_MAX };
-
-    assert(colorTargetCount > 0 || depthTarget != NULL);
-
-    for (int i = 0; i < colorTargetCount; i++) {
-        const GrColorTargetView* grColorTargetView = (GrColorTargetView*)colorTargets[i].view;
-
-        extent.width = MIN(extent.width, grColorTargetView->extent.width);
-        extent.height = MIN(extent.height, grColorTargetView->extent.height);
-        extent.depth = MIN(extent.depth, grColorTargetView->layerCount);//depth is 1 here
-    }
-
-    if (depthTarget != NULL) {
-        LOGW("unhandled depth target extent\n");
-    }
-
-    return extent;
-}
-
 static VkFramebuffer getVkFramebuffer(
     VkDevice device,
     VkRenderPass renderPass,
-    unsigned colorTargetCount,
-    const GR_COLOR_TARGET_BIND_INFO* colorTargets,
-    const GR_DEPTH_STENCIL_BIND_INFO* depthTarget,
-    VkExtent3D extent //contains layerCount as depth field
+    unsigned attachmentCount,
+    const VkImageView* attachments,
+    VkExtent2D extent,
+    unsigned layerCount
     )
 {
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
-
-    VkImageView attachments[GR_MAX_COLOR_TARGETS + 1];
-    int attachmentIdx = 0;
-
-    for (int i = 0; i < colorTargetCount; i++) {
-        GrColorTargetView* grColorTargetView = (GrColorTargetView*)colorTargets[i].view;
-
-        attachments[attachmentIdx++] = grColorTargetView->imageView;
-    }
-
-    // TODO
-    if (depthTarget != NULL) {
-        LOGW("depth targets are not supported\n");
-    }
 
     const VkFramebufferCreateInfo framebufferCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
         .pNext = NULL,
         .flags = 0,
         .renderPass = renderPass,
-        .attachmentCount = attachmentIdx,
+        .attachmentCount = attachmentCount,
         .pAttachments = attachments,
         .width = extent.width,
         .height = extent.height,
-        .layers = extent.depth,//actually layer count
+        .layers = layerCount,
     };
 
     if (vki.vkCreateFramebuffer(device, &framebufferCreateInfo, NULL,
@@ -89,8 +51,6 @@ static void initCmdBufferResources(
 {
     const GrPipeline* grPipeline = grCmdBuffer->grPipeline;
     VkPipelineBindPoint bindPoint = getVkPipelineBindPoint(GR_PIPELINE_BIND_POINT_GRAPHICS);
-    const GR_DEPTH_STENCIL_BIND_INFO* depthTarget =
-        grCmdBuffer->hasDepthTarget ? &grCmdBuffer->depthTarget : NULL;
 
     vki.vkCmdBindPipeline(grCmdBuffer->commandBuffer, bindPoint, grPipeline->pipeline);
 
@@ -99,13 +59,10 @@ static void initCmdBufferResources(
                                 grPipeline->pipelineLayout, 0, 1,
                                 grCmdBuffer->grDescriptorSet->descriptorSets, 0, NULL);
 
-    VkExtent3D minExtent =
-        getMinimumExtent(grCmdBuffer->colorTargetCount, grCmdBuffer->colorTargets, depthTarget);
-
     VkFramebuffer framebuffer =
         getVkFramebuffer(grCmdBuffer->grDescriptorSet->device, grPipeline->renderPass,
-                         grCmdBuffer->colorTargetCount, grCmdBuffer->colorTargets,
-                         depthTarget, minExtent);
+                         grCmdBuffer->attachmentCount, grCmdBuffer->attachments,
+                         grCmdBuffer->minExtent2D, grCmdBuffer->minLayerCount);
 
     const VkRenderPassBeginInfo beginInfo = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -114,7 +71,7 @@ static void initCmdBufferResources(
         .framebuffer = framebuffer,
         .renderArea = (VkRect2D) {
             .offset = { 0, 0 },
-            .extent = { minExtent.width, minExtent.height },
+            .extent = grCmdBuffer->minExtent2D,
         },
         .clearValueCount = 0,
         .pClearValues = NULL,
@@ -268,6 +225,8 @@ GR_VOID grCmdPrepareMemoryRegions(
     }
 }
 
+// FIXME what are target states for?
+// TODO handle depth target
 GR_VOID grCmdBindTargets(
     GR_CMD_BUFFER cmdBuffer,
     GR_UINT colorTargetCount,
@@ -277,15 +236,37 @@ GR_VOID grCmdBindTargets(
     LOGT("%p %u %p %p\n", cmdBuffer, colorTargetCount, pColorTargets, pDepthTarget);
     GrCmdBuffer* grCmdBuffer = (GrCmdBuffer*)cmdBuffer;
 
-    memcpy(grCmdBuffer->colorTargets, pColorTargets,
-           sizeof(GR_COLOR_TARGET_BIND_INFO) * colorTargetCount);
-    grCmdBuffer->colorTargetCount = colorTargetCount;
+    if (pDepthTarget != NULL) {
+        LOGW("unhandled depth target\n");
+    }
 
-    if (pDepthTarget == NULL) {
-        grCmdBuffer->hasDepthTarget = false;
-    } else {
-        memcpy(&grCmdBuffer->depthTarget, pDepthTarget, sizeof(GR_DEPTH_STENCIL_BIND_INFO));
-        grCmdBuffer->hasDepthTarget = true;
+    // Find minimum extent and layer count
+    grCmdBuffer->minExtent2D = (VkExtent2D) { UINT32_MAX, UINT32_MAX };
+    grCmdBuffer->minLayerCount = UINT32_MAX;
+
+    for (int i = 0; i < colorTargetCount; i++) {
+        const GrColorTargetView* grColorTargetView = (GrColorTargetView*)pColorTargets[i].view;
+
+        if (grColorTargetView != NULL) {
+            grCmdBuffer->minExtent2D.width = MIN(grCmdBuffer->minExtent2D.width,
+                                                 grColorTargetView->extent.width);
+            grCmdBuffer->minExtent2D.height = MIN(grCmdBuffer->minExtent2D.height,
+                                                  grColorTargetView->extent.height);
+            grCmdBuffer->minLayerCount = MIN(grCmdBuffer->minLayerCount,
+                                             grColorTargetView->layerCount);
+        }
+    }
+
+    // Copy attachments
+    grCmdBuffer->attachmentCount = 0;
+
+    for (int i = 0; i < colorTargetCount; i++) {
+        const GrColorTargetView* grColorTargetView = (GrColorTargetView*)pColorTargets[i].view;
+
+        if (grColorTargetView != NULL) {
+            grCmdBuffer->attachments[grCmdBuffer->attachmentCount] = grColorTargetView->imageView;
+            grCmdBuffer->attachmentCount++;
+        }
     }
 }
 

@@ -183,7 +183,7 @@ static unsigned getExtraCount(
     return info->extraCount;
 }
 
-static uint32_t decodeIlLang(
+static unsigned decodeIlLang(
     Kernel* kernel,
     const Token* token)
 {
@@ -191,7 +191,7 @@ static uint32_t decodeIlLang(
     return 1;
 }
 
-static uint32_t decodeIlVersion(
+static unsigned decodeIlVersion(
     Kernel* kernel,
     const Token* token)
 {
@@ -203,11 +203,11 @@ static uint32_t decodeIlVersion(
     return 1;
 }
 
-static uint32_t decodeDestination(
+static unsigned decodeDestination(
     Destination* dst,
     const Token* token)
 {
-    uint32_t idx = 0;
+    unsigned idx = 0;
     bool modifierPresent;
     uint8_t relativeAddress;
     uint8_t dimension;
@@ -260,11 +260,11 @@ static uint32_t decodeDestination(
     return idx;
 }
 
-static uint32_t decodeSource(
+static unsigned decodeSource(
     Source* src,
     const Token* token)
 {
-    uint32_t idx = 0;
+    unsigned idx = 0;
     bool modifierPresent;
     uint8_t relativeAddress;
     uint8_t dimension;
@@ -338,11 +338,11 @@ static uint32_t decodeSource(
     return idx;
 }
 
-static uint32_t decodeInstruction(
+static unsigned decodeInstruction(
     Instruction* instr,
     const Token* token)
 {
-    uint32_t idx = 0;
+    unsigned idx = 0;
 
     memset(instr, 0, sizeof(*instr));
 
@@ -408,10 +408,10 @@ static uint32_t decodeInstruction(
 
 Kernel* ilcDecodeStream(
     const Token* tokens,
-    uint32_t count)
+    unsigned count)
 {
     Kernel* kernel = malloc(sizeof(Kernel));
-    uint32_t idx = 0;
+    unsigned idx = 0;
 
     idx += decodeIlLang(kernel, &tokens[idx]);
     idx += decodeIlVersion(kernel, &tokens[idx]);

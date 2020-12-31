@@ -79,7 +79,7 @@ VkColorComponentFlags getVkColorComponentFlags(
     GR_UINT8 writeMask);
 
 VkShaderStageFlags getVkShaderStageFlags(
-    uint32_t stageIndex);
+    unsigned stageIndex);
 
 VkPipelineBindPoint getVkPipelineBindPoint(
     GR_PIPELINE_BIND_POINT bindPoint);
