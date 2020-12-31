@@ -3130,6 +3130,7 @@ uint32_t* ilcCompileKernel(
 
     free(compiler.regs);
     free(compiler.resources);
+    free(compiler.uavResources);
     free(compiler.controlFlowBlocks);
     ilcSpvFinish(&module);
 
