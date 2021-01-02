@@ -879,9 +879,10 @@ static const IlcUavResource* createUavResource(
     ilcSpvPutName(compiler->module, imageId, "uav4Buffer");//TODO: replace name
 
     IlcSpvWord descriptorSetIdx = compiler->kernel->shaderType;
+    IlcSpvWord bindingIdx = id;
     ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationDescriptorSet,
                         1, &descriptorSetIdx);
-    IlcSpvWord bindingIdx = id;
+
     ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationBinding, 1, &bindingIdx);
     const IlcUavResource resource = {
         .id = resourceId,
@@ -1757,6 +1758,11 @@ static IlcSpvId emitOrGetSampler(
                                                  compiler->samplerId);
     compiler->samplerResources[ilSamplerId] = ilcSpvPutVariable(compiler->module, pSamplerId,
                                                                SpvStorageClassUniformConstant);
+    IlcSpvId descriptorSetIdx = compiler->kernel->shaderType;
+    ilcSpvPutDecoration(compiler->module, compiler->samplerResources[ilSamplerId], SpvDecorationDescriptorSet,
+                        1, &descriptorSetIdx);
+    IlcSpvWord bindingIdx = ilSamplerId;
+    ilcSpvPutDecoration(compiler->module, compiler->samplerResources[ilSamplerId], SpvDecorationBinding, 1, &bindingIdx);
     return compiler->samplerResources[ilSamplerId];
 }
 
@@ -2466,8 +2472,11 @@ static void emitRawSrvLoad(
                                                 SpvStorageClassUniformConstant);
         ilcSpvPutName(compiler->module, imageId, "uintSrvBuffer");
         IlcSpvWord descriptorSetIdx = compiler->kernel->shaderType;
+        IlcSpvWord bindingIdx = ilResourceId;
         ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationDescriptorSet,
                             1, &descriptorSetIdx);//TODO: replace descriptor sets
+        ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationBinding,
+                            1, &bindingIdx);
         const IlcResource newResource = {
             .id = resourceId,
             .typeId = imageId,
@@ -2534,8 +2543,11 @@ static void emitStructuredSrvLoad(
                                                 SpvStorageClassUniformConstant);
         ilcSpvPutName(compiler->module, imageId, "uint4Buffer");
         IlcSpvWord descriptorSetIdx = compiler->kernel->shaderType;
+        IlcSpvWord bindingIdx = ilResourceId;
         ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationDescriptorSet,
                             1, &descriptorSetIdx);//TODO: replace descriptor sets
+        ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationBinding,
+                            1, &bindingIdx);
         const IlcResource newResource = {
             .id = resourceId,
             .typeId = imageId,
@@ -2603,8 +2615,11 @@ static void emitRawUavLoad(
                                                 SpvStorageClassUniformConstant);
         ilcSpvPutName(compiler->module, imageId, "uintUavBuffer");
         IlcSpvWord descriptorSetIdx = compiler->kernel->shaderType;
+        IlcSpvWord bindingIdx = ilResourceId;
         ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationDescriptorSet,
                             1, &descriptorSetIdx);//TODO: replace descriptor sets
+        ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationBinding,
+                            1, &bindingIdx);
         const IlcUavResource newResource = {
             .id = resourceId,
             .typeId = imageId,
@@ -2770,8 +2785,11 @@ static void emitRawUavStore(
                                                 SpvStorageClassUniformConstant);
         ilcSpvPutName(compiler->module, imageId, "uintUavBuffer");
         IlcSpvWord descriptorSetIdx = compiler->kernel->shaderType;
+        IlcSpvWord bindingIdx = ilResourceId;
         ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationDescriptorSet,
                             1, &descriptorSetIdx);//TODO: replace descriptor sets
+        ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationBinding,
+                            1, &bindingIdx);
         const IlcUavResource newResource = {
             .id = resourceId,
             .typeId = imageId,
