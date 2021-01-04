@@ -429,7 +429,9 @@ GR_VOID grCmdSetEvent(
     LOGT("%p %p\n", cmdBuffer, event);
     GrCmdBuffer* grCmdBuffer = (GrCmdBuffer*)cmdBuffer;
     GrEvent* grEvent = (GrEvent*)event;
-    vki.vkCmdSetEvent(grCmdBuffer->commandBuffer, grEvent->event, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+
+    vki.vkCmdSetEvent(grCmdBuffer->commandBuffer, grEvent->event,
+                      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 }
 
 GR_VOID grCmdResetEvent(
@@ -439,7 +441,8 @@ GR_VOID grCmdResetEvent(
     LOGT("%p %p\n", cmdBuffer, event);
     GrCmdBuffer* grCmdBuffer = (GrCmdBuffer*)cmdBuffer;
     GrEvent* grEvent = (GrEvent*)event;
-    vki.vkCmdResetEvent(grCmdBuffer->commandBuffer, grEvent->event, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    vki.vkCmdResetEvent(grCmdBuffer->commandBuffer, grEvent->event,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 }
 
 GR_VOID grCmdBeginQuery(
@@ -474,7 +477,8 @@ GR_VOID grCmdResetQueryPool(
     LOGT("%p %p %u %u\n", cmdBuffer, queryPool, startQuery, queryCount);
     GrCmdBuffer* grCmdBuffer = (GrCmdBuffer*)cmdBuffer;
     GrQueryPool* grQueryPool = (GrQueryPool*)queryPool;
-    vki.vkCmdResetQueryPool(grCmdBuffer->commandBuffer, grQueryPool->pool, startQuery, queryCount);
+    vki.vkCmdResetQueryPool(grCmdBuffer->commandBuffer, grQueryPool->pool,
+                            startQuery, queryCount);
 }
 
 GR_VOID grCmdWriteTimestamp(
@@ -507,6 +511,8 @@ GR_VOID grCmdWriteTimestamp(
         return;
     }
     VkPipelineStageFlags stageFlag = timestampType == GR_TIMESTAMP_TOP ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-    vki.vkCmdWriteTimestamp( grCmdBuffer->commandBuffer, stageFlag, grCmdBuffer->timestampQueryPool, 0);
-    vki.vkCmdCopyQueryPoolResults( grCmdBuffer->commandBuffer, grCmdBuffer->timestampQueryPool, 0, 1, grMemory->buffer, destOffset, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+    vki.vkCmdWriteTimestamp(grCmdBuffer->commandBuffer, stageFlag,
+                            grCmdBuffer->timestampQueryPool, 0);
+    vki.vkCmdCopyQueryPoolResults(grCmdBuffer->commandBuffer, grCmdBuffer->timestampQueryPool,
+                                  0, 1, grMemory->buffer, destOffset, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
 }
