@@ -54,7 +54,6 @@ static void initCmdBufferResources(
 
     vki.vkCmdBindPipeline(grCmdBuffer->commandBuffer, bindPoint, grPipeline->pipeline);
 
-    //unwrap descriptor set tree
     vki.vkCmdBindDescriptorSets(grCmdBuffer->commandBuffer, bindPoint,
                                 grPipeline->pipelineLayout, 0, 1,
                                 &grCmdBuffer->grDevice->globalDescriptorSet.descriptorTable, 0, NULL);
@@ -85,10 +84,61 @@ static void initCmdBufferResources(
     if (grCmdBuffer->hasActiveRenderPass) {
         vki.vkCmdEndRenderPass(grCmdBuffer->commandBuffer);
     }
+    //TODO: cache renderpass calls
     vki.vkCmdBeginRenderPass(grCmdBuffer->commandBuffer, &beginInfo, VK_SUBPASS_CONTENTS_INLINE);
     grCmdBuffer->hasActiveRenderPass = true;
 
     grCmdBuffer->isDirty = false;
+}
+
+static void initDynamicBuffers(GrCmdBuffer* grCmdBuffer, VkPipelineBindPoint bindPoint)
+{
+    grCmdBuffer->dynamicMemoryViews = (VkBufferView*)realloc(grCmdBuffer->dynamicMemoryViews, sizeof(VkBufferView) * (1 + grCmdBuffer->dynamicBufferViewsCount));
+    const VkBufferViewCreateInfo createInfo = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO,
+        .pNext = NULL,
+        .buffer = ((GrGpuMemory*)(grCmdBuffer->graphicsBufferInfo.mem))->buffer,
+         .format = getVkFormat(grCmdBuffer->graphicsBufferInfo.format),
+         .offset = grCmdBuffer->graphicsBufferInfo.offset,
+         .range = grCmdBuffer->graphicsBufferInfo.range,
+    };
+    VkBufferView bufferView;
+    assert(vki.vkCreateBufferView(grCmdBuffer->grDevice->device, &createInfo, NULL, &bufferView) == VK_SUCCESS);
+    grCmdBuffer->dynamicMemoryViews[grCmdBuffer->dynamicBufferViewsCount] = bufferView;
+    VkWriteDescriptorSet writeDescriptorSet[2] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = NULL,
+            .dstSet = VK_NULL_HANDLE,
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
+            .pImageInfo = NULL,
+            .pBufferInfo = NULL,
+            .pTexelBufferView = &bufferView,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .pNext = NULL,
+            .dstSet = VK_NULL_HANDLE,
+            .dstBinding = 1,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
+            .pImageInfo = NULL,
+            .pBufferInfo = NULL,
+            .pTexelBufferView = &bufferView,
+        }
+    };//TODO: write this in basic descriptor set if this extension is not supported
+
+    vki.vkCmdPushDescriptorSetKHR(grCmdBuffer->commandBuffer, bindPoint,
+                                  bindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS ? grCmdBuffer->grDevice->pipelineLayouts.graphicsPipelineLayout : grCmdBuffer->grDevice->pipelineLayouts.computePipelineLayout,
+                                  1,//TODO: move in define upwards
+                                  2, writeDescriptorSet);
+
+    grCmdBuffer->dynamicBufferViewsCount++;
+    grCmdBuffer->isDynamicBufferDirty = false;//TODO:change different flags for compute pipeline
 }
 
 // Command Buffer Building Functions
@@ -200,6 +250,23 @@ GR_VOID grCmdBindDescriptorSet(
         grCmdBuffer->computeDescriptorSets[index] = grDescriptorSet;
     }
 
+}
+
+GR_VOID grCmdBindDynamicMemoryView(
+    GR_CMD_BUFFER cmdBuffer,
+    GR_ENUM pipelineBindPoint,
+    const GR_MEMORY_VIEW_ATTACH_INFO* pMemView)
+{
+    LOGT("%p 0x%X %p\n", cmdBuffer, pipelineBindPoint, pMemView);
+    GrCmdBuffer* grCmdBuffer = (GrCmdBuffer*)cmdBuffer;
+    if (pipelineBindPoint == GR_PIPELINE_BIND_POINT_GRAPHICS && memcmp(pMemView, &grCmdBuffer->graphicsBufferInfo, sizeof(GR_MEMORY_VIEW_ATTACH_INFO)) != 0) {
+        memcpy(&grCmdBuffer->graphicsBufferInfo, pMemView, sizeof(GR_MEMORY_VIEW_ATTACH_INFO));
+        grCmdBuffer->isDynamicBufferDirty = true;
+    }
+    else if (memcmp(pMemView, &grCmdBuffer->computeBufferInfo, sizeof(GR_MEMORY_VIEW_ATTACH_INFO)) != 0) {
+        memcpy(&grCmdBuffer->computeBufferInfo, pMemView, sizeof(GR_MEMORY_VIEW_ATTACH_INFO));
+        //TODO: add dirty flag
+    }
 }
 
 GR_VOID grCmdPrepareMemoryRegions(
@@ -321,7 +388,9 @@ GR_VOID grCmdDraw(
     if (grCmdBuffer->isDirty) {
         initCmdBufferResources(grCmdBuffer);
     }
-
+    if (grCmdBuffer->isDynamicBufferDirty) {
+        initDynamicBuffers(grCmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
+    }
     vki.vkCmdDraw(grCmdBuffer->commandBuffer,
                   vertexCount, instanceCount, firstVertex, firstInstance);
 }
@@ -341,7 +410,9 @@ GR_VOID grCmdDrawIndexed(
     if (grCmdBuffer->isDirty) {
         initCmdBufferResources(grCmdBuffer);
     }
-
+    if (grCmdBuffer->isDynamicBufferDirty) {
+        initDynamicBuffers(grCmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
+    }
     vki.vkCmdDrawIndexed(grCmdBuffer->commandBuffer,
                          indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }

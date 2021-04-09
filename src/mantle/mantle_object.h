@@ -55,8 +55,13 @@ typedef struct _GrCmdBuffer {
     VkImageView attachments[GR_MAX_COLOR_TARGETS + 1]; // Extra depth target
     VkExtent2D minExtent2D;
     uint32_t minLayerCount;
+    VkBufferView *dynamicMemoryViews;
+    unsigned dynamicBufferViewsCount;
+    GR_MEMORY_VIEW_ATTACH_INFO graphicsBufferInfo;
+    GR_MEMORY_VIEW_ATTACH_INFO computeBufferInfo;
     bool hasActiveRenderPass;
     bool isDirty;
+    bool isDynamicBufferDirty;// TODO: make the same flag for compute
 } GrCmdBuffer;
 
 typedef struct _GrColorBlendStateObject {
@@ -135,6 +140,8 @@ typedef struct _GrDescriptorSet {
 
 typedef struct _GrGlobalDescriptorSet {
     VkDescriptorSetLayout descriptorTableLayout;
+    VkDescriptorSetLayout graphicsDynamicMemoryLayout;
+    VkDescriptorSetLayout computeDynamicMemoryLayout;
     VkDescriptorPool descriptorPool;
     VkDescriptorSet descriptorTable;
     VkSampler* samplers;
@@ -146,6 +153,11 @@ typedef struct _GrGlobalDescriptorSet {
     unsigned descriptorCount;
 } GrGlobalDescriptorSet;
 
+typedef struct _GrGlobalPipelineLayouts {
+    VkPipelineLayout graphicsPipelineLayout;
+    VkPipelineLayout computePipelineLayout;
+} GrGlobalPipelineLayouts;
+
 typedef struct _GrDevice {
     GrStructType sType;
     VkDevice device;
@@ -156,6 +168,7 @@ typedef struct _GrDevice {
     unsigned computeQueueIndex;
     VkCommandPool computeCommandPool;
     GrGlobalDescriptorSet globalDescriptorSet;
+    GrGlobalPipelineLayouts pipelineLayouts;
     unsigned vDescriptorSetMemoryTypeIndex;
 } GrDevice;
 
@@ -201,19 +214,11 @@ typedef struct _GrPhysicalGpu {
     VkPhysicalDevice physicalDevice;
 } GrPhysicalGpu;
 
-typedef struct _GrNestedDescriptorSetMapping {
-    struct _GrNestedDescriptorSetMapping* nestedSet;
-    struct _GrNestedDescriptorSetMapping* nextSet;
-    unsigned slotIndex;
-} GrNestedDescriptorSetMapping;
-
 typedef struct _GrPipeline {
     GrStructType sType;
-    VkPipelineLayout pipelineLayout;
     VkPipeline pipeline;
+    VkPipelineLayout pipelineLayout;
     VkRenderPass renderPass;
-    GrNestedDescriptorSetMapping nestedDescriptorSets;
-    unsigned boundDescriptorSetCount;
 } GrPipeline;
 
 typedef struct _GrRasterStateObject {

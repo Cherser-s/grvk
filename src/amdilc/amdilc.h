@@ -17,7 +17,7 @@ enum IlcDescriptorResourceTable {
 
 uint32_t* ilcCompileShader(
     unsigned* compiledSize,
-    const GR_DESCRIPTOR_SET_MAPPING* mappings,
+    const GR_PIPELINE_SHADER* mappings,
     const void* code,
     unsigned size);
 

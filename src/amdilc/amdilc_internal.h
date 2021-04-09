@@ -86,7 +86,7 @@ void ilcDumpKernel(
 
 uint32_t* ilcCompileKernel(
     unsigned* size,
-    const GR_DESCRIPTOR_SET_MAPPING* mappings,
+    const GR_PIPELINE_SHADER* mappings,
     const Kernel* kernel);
 
 #endif // AMDILC_INTERNAL_H_

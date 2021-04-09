@@ -37,6 +37,9 @@ GR_RESULT grCreateCommandBuffer(
     }
 
     GrCmdBuffer* grCmdBuffer = malloc(sizeof(GrCmdBuffer));
+    if (grCmdBuffer == NULL) {
+        return GR_ERROR_OUT_OF_MEMORY;
+    }
     *grCmdBuffer = (GrCmdBuffer) {
         .sType = GR_STRUCT_TYPE_COMMAND_BUFFER,
         .grDevice = grDevice,
@@ -50,9 +53,14 @@ GR_RESULT grCreateCommandBuffer(
         .attachmentCount = 0,
         .attachments = { NULL },
         .minExtent2D = { 0, 0 },
+        .dynamicMemoryViews = NULL,
+        .dynamicBufferViewsCount = 0,
+        .graphicsBufferInfo = {},
+        .computeBufferInfo = {},
         .minLayerCount = 0,
         .hasActiveRenderPass = false,
         .isDirty = false,
+        .isDynamicBufferDirty = false,
     };
 
     *pCmdBuffer = (GR_CMD_BUFFER)grCmdBuffer;

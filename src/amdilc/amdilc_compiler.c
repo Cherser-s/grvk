@@ -18,7 +18,9 @@
 #define COMP_MASK_XYZ       (COMP_MASK_XY | COMP_MASK_Z)
 #define COMP_MASK_XYZW      (COMP_MASK_XYZ | COMP_MASK_W)
 
-
+#define DYNAMIC_MEMORY_BINDING_DESCRIPTOR_SET (1)
+#define DYNAMIC_MEMORY_RESOURCE_BINDING (0)
+#define DYNAMIC_MEMORY_UAV_BINDING (1)
 typedef struct {
     IlcSpvId id;
     IlcSpvId typeId;
@@ -34,6 +36,7 @@ typedef struct {
     IlcSpvId imageTypePtrId;
     IlcSpvId depthTypePtrId;
     IlcSpvId imageRepoId;
+    bool isDynamicResource;
     uint32_t ilId;
     uint32_t strideId;
     uint32_t ilType;
@@ -45,6 +48,7 @@ typedef struct {
     IlcSpvId typeId;
     IlcSpvId pTypeId;
     IlcSpvId repoId;
+    bool isDynamicResource;
     uint32_t ilId;
     uint32_t strideId;
     uint32_t ilType;
@@ -119,7 +123,7 @@ typedef struct {
     IlcSpvId samplerPtrId;
     IlcSpvId samplerRepositoryId;
     VirtualDescriptorResources descriptorSetTypes;
-    const GR_DESCRIPTOR_SET_MAPPING* mappings;
+    const GR_PIPELINE_SHADER* mappings;
     unsigned regCount;
     IlcRegister* regs;
     unsigned resourceRepoCount;
@@ -304,8 +308,14 @@ static const IlcResource* addResource(
     }
 
     char name[32];
-    snprintf(name, 32, "resourceIndex%u", resource->ilId);
-    ilcSpvPutName(compiler->module, resource->resourceIndexId, name);
+    char* varName = name;
+    if (resource->isDynamicResource) {
+        varName = "srvDynamicBuffer";
+    }
+    else {
+        snprintf(name, 32, "resourceIndex%u", resource->ilId);
+    }
+    ilcSpvPutName(compiler->module, resource->resourceIndexId, varName);
 
     compiler->resourceCount++;
     compiler->resources = realloc(compiler->resources,
@@ -325,8 +335,14 @@ static const IlcUavResource* addUavResource(
     }
 
     char name[32];
-    snprintf(name, 32, "uavResourceIndex%u", resource->ilId);
-    ilcSpvPutName(compiler->module, resource->resourceIndexId, name);
+    char* varName = name;
+    if (resource->isDynamicResource) {
+        varName = "uavDynamicBuffer";
+    }
+    else {
+        snprintf(name, 32, "uavResourceIndex%u", resource->ilId);
+    }
+    ilcSpvPutName(compiler->module, resource->resourceIndexId, varName);
 
     compiler->uavResourceCount++;
     compiler->uavResources = realloc(compiler->uavResources,
@@ -939,7 +955,7 @@ static IlcSpvId emitResourceIndexLoad(
     unsigned nestingCount;
     unsigned descriptorIndex = 0;
     for (unsigned i = 0; i < GR_MAX_DESCRIPTOR_SETS;++i) {
-        nestingCount = findResourceIndex(compiler->mappings + i, nestedIndices, shaderResourceId, slotType);
+        nestingCount = findResourceIndex(compiler->mappings->descriptorSetMapping + i, nestedIndices, shaderResourceId, slotType);
         if (nestingCount != 0xFFFFFFFF) {
             descriptorIndex = i;
             break;
@@ -1002,39 +1018,54 @@ static const IlcUavResource* createUavResource(
         LOGE("unsupported element format %X", fmtx);
         assert(false);
     }
-    IlcSpvId indexId = emitResourceIndexLoad(compiler, (unsigned)id, GR_SLOT_SHADER_UAV);
     IlcSpvId imageId = ilcSpvPutImageType(compiler->module, sampledTypeId, dim,
                                                     0 /*depth*/, isArrayed, isMultiSampled,
                                                     2 /*storage image*/,
                                           imageFormat/*, SpvAccessQualifierReadWrite*/);// just specify read write, it is possible to check for access type though or not write access type at all
-    const IlcUavResource* resourceTable = findUavResourceTable(compiler, imageId);
+    IlcSpvId resourceIndexId;
     IlcSpvId pImageId, repoId;
-    if (resourceTable != NULL) {
-        pImageId = resourceTable->pTypeId;
-        repoId = resourceTable->repoId;
+    bool isDynamicResource = dim == SpvDimBuffer && compiler->mappings->dynamicMemoryViewMapping.slotObjectType == GR_SLOT_SHADER_UAV && compiler->mappings->dynamicMemoryViewMapping.shaderEntityIndex == id;
+    if (isDynamicResource) {
+        pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
+                                        imageId);
+        repoId = 0;
+        resourceIndexId = ilcSpvPutVariable(compiler->module, pImageId, SpvStorageClassUniformConstant);
+        const unsigned descriptorSetIndex = DYNAMIC_MEMORY_BINDING_DESCRIPTOR_SET;
+        const unsigned descriptorSetBinding = DYNAMIC_MEMORY_UAV_BINDING;
+        ilcSpvPutDecoration(compiler->module, resourceIndexId, SpvDecorationDescriptorSet, 1, &descriptorSetIndex);
+        ilcSpvPutDecoration(compiler->module, resourceIndexId, SpvDecorationBinding, 1, &descriptorSetBinding);
     }
     else {
-        pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
-                                             imageId);
-        IlcSpvId arrayCounterId = ilcSpvPutTypeConstant(compiler->module, compiler->uintId, 10240);
-        IlcSpvId repoArrayType = ilcSpvPutArrayType(compiler->module, imageId, arrayCounterId);
-        IlcSpvId pRepoArrayType = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant, repoArrayType);
-        repoId = ilcSpvPutVariable(compiler->module, pRepoArrayType, SpvStorageClassUniformConstant);
+        const IlcUavResource* resourceTable = findUavResourceTable(compiler, imageId);
+        resourceIndexId = emitResourceIndexLoad(compiler, (unsigned)id, GR_SLOT_SHADER_UAV);
+        if (resourceTable != NULL) {
+            pImageId = resourceTable->pTypeId;
+            repoId = resourceTable->repoId;
+        }
+        else {
+            pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
+                                            imageId);
+            IlcSpvId arrayCounterId = ilcSpvPutTypeConstant(compiler->module, compiler->uintId, 10240);
+            IlcSpvId repoArrayType = ilcSpvPutArrayType(compiler->module, imageId, arrayCounterId);
+            IlcSpvId pRepoArrayType = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant, repoArrayType);
+            repoId = ilcSpvPutVariable(compiler->module, pRepoArrayType, SpvStorageClassUniformConstant);
 
-        IlcSpvWord descriptorSetIndex = 0;
-        IlcSpvWord descriptorSetBinding = (dim == SpvDimBuffer) ? TABLE_STORAGE_TEXEL_BUFFER : TABLE_STORAGE_IMAGE;
-        ilcSpvPutDecoration(compiler->module, repoId, SpvDecorationDescriptorSet, 1, &descriptorSetIndex);
-        ilcSpvPutDecoration(compiler->module, repoId, SpvDecorationBinding, 1, &descriptorSetBinding);
-        addResourceTable(compiler, repoId);
+            IlcSpvWord descriptorSetIndex = 0;
+            IlcSpvWord descriptorSetBinding = (dim == SpvDimBuffer) ? TABLE_STORAGE_TEXEL_BUFFER : TABLE_STORAGE_IMAGE;
+            ilcSpvPutDecoration(compiler->module, repoId, SpvDecorationDescriptorSet, 1, &descriptorSetIndex);
+            ilcSpvPutDecoration(compiler->module, repoId, SpvDecorationBinding, 1, &descriptorSetBinding);
+            addResourceTable(compiler, repoId);
+        }
     }
     ilcSpvPutName(compiler->module, imageId, "uav4Buffer");//TODO: replace name
 
     const IlcUavResource resource = {
-        .resourceIndexId = indexId,
+        .resourceIndexId = resourceIndexId,
         .typeId = imageId,
         .pTypeId = pImageId,
         .repoId = repoId,
         .ilId = id,
+        .isDynamicResource = isDynamicResource,
         .strideId = stride == 0 ? 0 : ilcSpvPutConstant(compiler->module, compiler->uintId, stride),
         .ilType = type,
         .ilSampledType = fmtx,
@@ -1081,46 +1112,68 @@ static const IlcResource* createResource(
         assert(false);
     }
 
-    IlcSpvId indexId = emitResourceIndexLoad(compiler, (unsigned)id, GR_SLOT_SHADER_RESOURCE);
-
     IlcSpvId imageId = ilcSpvPutImageType(compiler->module, sampledTypeId, dim,
                                           false /*depth*/, isArrayed, isMultiSampled, 1, imageFormat);
-    const IlcResource* resourceTable = findResourceTable(compiler, imageId);
 
+    IlcSpvId resourceIndexId;
     IlcSpvId depthImageId, pImageId, pDepthImageId, imageRepoId;
-    if (resourceTable != NULL) {
-        depthImageId = resourceTable->depthTypeId;
-        pDepthImageId = resourceTable->depthTypePtrId;
-        pImageId = resourceTable->imageTypePtrId;
-        imageRepoId = resourceTable->imageRepoId;
-    }
-    else {
-        ilcSpvPutName(compiler->module, imageId, "float4Buffer");
-        IlcSpvWord descriptorSetIndex = 0;
-        IlcSpvWord descriptorSetBinding = (dim == SpvDimBuffer) ? TABLE_UNIFORM_TEXEL_BUFFER : TABLE_SAMPLED_IMAGE;
-
-        IlcSpvId counterId = ilcSpvPutTypeConstant(compiler->module, compiler->uintId, 10240);
-        // unless sampled type is float, don't define an additional depth type
+    bool isDynamicResource = dim == SpvDimBuffer && compiler->mappings->dynamicMemoryViewMapping.slotObjectType == GR_SLOT_SHADER_RESOURCE && compiler->mappings->dynamicMemoryViewMapping.shaderEntityIndex == id;
+    if (isDynamicResource) {
+        pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
+                                        imageId);
         if (sampledTypeId == compiler->floatId) {
             depthImageId = ilcSpvPutImageType(compiler->module, sampledTypeId, dim,
                                               true /*depth*/, isArrayed, isMultiSampled,
                                               1, imageFormat);
-            pDepthImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
-                                                 depthImageId);
         }
         else {
-            pDepthImageId = 0;
             depthImageId = 0;
         }
-        pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
-                                        imageId);
-        IlcSpvId imageRepoArrayType = ilcSpvPutArrayType(compiler->module, imageId, counterId);
-        IlcSpvId pImageRepoArrayType = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant, imageRepoArrayType);
-        imageRepoId = ilcSpvPutVariable(compiler->module, pImageRepoArrayType, SpvStorageClassUniformConstant);
+        pDepthImageId = 0;
+        imageRepoId = 0;
+        resourceIndexId = ilcSpvPutVariable(compiler->module, pImageId, SpvStorageClassUniformConstant);
+        const unsigned descriptorSetIndex = DYNAMIC_MEMORY_BINDING_DESCRIPTOR_SET;
+        const unsigned descriptorSetBinding = DYNAMIC_MEMORY_RESOURCE_BINDING;
+        ilcSpvPutDecoration(compiler->module, resourceIndexId, SpvDecorationDescriptorSet, 1, &descriptorSetIndex);
+        ilcSpvPutDecoration(compiler->module, resourceIndexId, SpvDecorationBinding, 1, &descriptorSetBinding);
+    }
+    else {
+        const IlcResource* resourceTable = findResourceTable(compiler, imageId);
+        resourceIndexId = emitResourceIndexLoad(compiler, (unsigned)id, GR_SLOT_SHADER_RESOURCE);
+        if (resourceTable != NULL) {
+            depthImageId = resourceTable->depthTypeId;
+            pDepthImageId = resourceTable->depthTypePtrId;
+            pImageId = resourceTable->imageTypePtrId;
+            imageRepoId = resourceTable->imageRepoId;
+        }
+        else {
+            ilcSpvPutName(compiler->module, imageId, "float4Buffer");
+            IlcSpvWord descriptorSetIndex = 0;
+            IlcSpvWord descriptorSetBinding = (dim == SpvDimBuffer) ? TABLE_UNIFORM_TEXEL_BUFFER : TABLE_SAMPLED_IMAGE;
 
-        ilcSpvPutDecoration(compiler->module, imageRepoId, SpvDecorationDescriptorSet, 1, &descriptorSetIndex);
-        ilcSpvPutDecoration(compiler->module, imageRepoId, SpvDecorationBinding, 1, &descriptorSetBinding);
-        addResourceTable(compiler, imageRepoId);
+            IlcSpvId counterId = ilcSpvPutTypeConstant(compiler->module, compiler->uintId, 10240);
+            // unless sampled type is float, don't define an additional depth type
+            if (sampledTypeId == compiler->floatId) {
+                depthImageId = ilcSpvPutImageType(compiler->module, sampledTypeId, dim,
+                                                  true /*depth*/, isArrayed, isMultiSampled,
+                                                  1, imageFormat);
+                pDepthImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
+                                                     depthImageId);
+            }
+            else {
+                pDepthImageId = 0;
+                depthImageId = 0;
+            }
+            pImageId = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant,
+                                            imageId);
+            IlcSpvId imageRepoArrayType = ilcSpvPutArrayType(compiler->module, imageId, counterId);
+            IlcSpvId pImageRepoArrayType = ilcSpvPutPointerType(compiler->module, SpvStorageClassUniformConstant, imageRepoArrayType);
+            imageRepoId = ilcSpvPutVariable(compiler->module, pImageRepoArrayType, SpvStorageClassUniformConstant);
+
+            ilcSpvPutDecoration(compiler->module, imageRepoId, SpvDecorationDescriptorSet, 1, &descriptorSetIndex);
+            ilcSpvPutDecoration(compiler->module, imageRepoId, SpvDecorationBinding, 1, &descriptorSetBinding);
+            addResourceTable(compiler, imageRepoId);
+        }
     }
 
     if (dim == SpvDimBuffer) {
@@ -1128,12 +1181,13 @@ static const IlcResource* createResource(
     }
 
     const IlcResource resource = {
-        .resourceIndexId = indexId,
+        .resourceIndexId = resourceIndexId,
         .typeId = imageId,
         .depthTypeId = depthImageId,
         .imageTypePtrId = pImageId,
         .depthTypePtrId = pDepthImageId,
         .imageRepoId = imageRepoId,
+        .isDynamicResource = isDynamicResource,
         .ilId = id,
         .strideId = stride == 0 ? 0 : ilcSpvPutConstant(compiler->module, compiler->uintId, stride),
         .ilType = type,
@@ -1846,9 +1900,14 @@ static IlcSpvId emitUavResourceLoad(
     IlcCompiler* compiler,
     const IlcUavResource* resource)
 {
-    IlcSpvId indexId = ilcSpvPutLoad(compiler->module, compiler->uintId, resource->resourceIndexId, 0, NULL);
-    IlcSpvId resourcePtrId = ilcSpvPutAccessChain(compiler->module, resource->pTypeId, resource->repoId, 1, &indexId);
-    return ilcSpvPutLoad(compiler->module, resource->typeId, resourcePtrId, 0, NULL);
+    if (resource->isDynamicResource) {
+        return ilcSpvPutLoad(compiler->module, resource->typeId, resource->resourceIndexId, 0, NULL);
+    }
+    else {
+        IlcSpvId indexId = ilcSpvPutLoad(compiler->module, compiler->uintId, resource->resourceIndexId, 0, NULL);
+        IlcSpvId resourcePtrId = ilcSpvPutAccessChain(compiler->module, resource->pTypeId, resource->repoId, 1, &indexId);
+        return ilcSpvPutLoad(compiler->module, resource->typeId, resourcePtrId, 0, NULL);
+    }
 }
 
 
@@ -1856,9 +1915,14 @@ static IlcSpvId emitResourceLoad(
     IlcCompiler* compiler,
     const IlcResource* resource)
 {
-    IlcSpvId indexId = ilcSpvPutLoad(compiler->module, compiler->uintId, resource->resourceIndexId, 0, NULL);
-    IlcSpvId resourcePtrId = ilcSpvPutAccessChain(compiler->module, resource->imageTypePtrId, resource->imageRepoId, 1, &indexId);
-    return ilcSpvPutLoad(compiler->module, resource->typeId, resourcePtrId, 0, NULL);
+    if (resource->isDynamicResource) {
+        return ilcSpvPutLoad(compiler->module, resource->typeId, resource->resourceIndexId, 0, NULL);
+    }
+    else {
+        IlcSpvId indexId = ilcSpvPutLoad(compiler->module, compiler->uintId, resource->resourceIndexId, 0, NULL);
+        IlcSpvId resourcePtrId = ilcSpvPutAccessChain(compiler->module, resource->imageTypePtrId, resource->imageRepoId, 1, &indexId);
+        return ilcSpvPutLoad(compiler->module, resource->typeId, resourcePtrId, 0, NULL);
+    }
 }
 
 static IlcSpvId emitSamplerLoad(
@@ -3132,7 +3196,7 @@ static void emitEntryPoint(
 
 uint32_t* ilcCompileKernel(
     unsigned* size,
-    const GR_DESCRIPTOR_SET_MAPPING* mappings,
+    const GR_PIPELINE_SHADER* mappings,
     const Kernel* kernel)
 {
     IlcSpvModule module;

@@ -6,37 +6,6 @@ typedef struct _Stage {
     VkShaderStageFlagBits flags;
 } Stage;
 
-static VkPipelineLayout getVkPipelineLayout(
-    const VkDevice vkDevice,
-    const VkDescriptorSetLayout* layouts,
-    unsigned descriptorSetCount)
-{
-    VkPipelineLayout layout = VK_NULL_HANDLE;
-
-    const VkPushConstantRange pushRange = {
-        .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
-        .offset = 0,
-        .size = sizeof(uint64_t) * GR_MAX_DESCRIPTOR_SETS
-    };
-
-    const VkPipelineLayoutCreateInfo createInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .pNext = NULL,
-        .flags = 0,
-        .setLayoutCount = descriptorSetCount,
-        .pSetLayouts = layouts,
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges = &pushRange,
-    };
-
-    if (vki.vkCreatePipelineLayout(vkDevice, &createInfo, NULL, &layout) != VK_SUCCESS) {
-        LOGE("vkCreatePipelineLayout failed\n");
-        return VK_NULL_HANDLE;
-    }
-
-    return layout;
-}
-
 static VkRenderPass getVkRenderPass(
     const VkDevice vkDevice,
     const GR_PIPELINE_CB_TARGET_STATE* cbTargets,
@@ -328,7 +297,7 @@ GR_RESULT grCreateGraphicsPipeline(
         }
         else {
             uint32_t codeSize;
-            uint32_t* codeCopy = ilcCompileShader(&codeSize, stage->shader->descriptorSetMapping, grShader->code, grShader->codeSize);
+            uint32_t* codeCopy = ilcCompileShader(&codeSize, stage->shader, grShader->code, grShader->codeSize);
             if (codeCopy == NULL) {
                 return GR_ERROR_OUT_OF_MEMORY;
             }
@@ -529,20 +498,15 @@ GR_RESULT grCreateGraphicsPipeline(
         .pDynamicStates = dynamicStates,
     };
 
-    VkPipelineLayout layout = getVkPipelineLayout(grDevice->device, &grDevice->globalDescriptorSet.descriptorTableLayout, 1);
-    if (layout == VK_NULL_HANDLE) {
-        return GR_ERROR_OUT_OF_MEMORY;
-    }
-
     VkRenderPass renderPass = getVkRenderPass(grDevice->device,
                                               pCreateInfo->cbState.target, &pCreateInfo->dbState);
     if (renderPass == VK_NULL_HANDLE)
     {
-        vki.vkDestroyPipelineLayout(grDevice->device, layout, NULL);
         return GR_ERROR_OUT_OF_MEMORY;
     }
 
     VkPipeline vkPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout layout = grDevice->pipelineLayouts.graphicsPipelineLayout;
 
     const VkGraphicsPipelineCreateInfo pipelineCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -578,9 +542,6 @@ GR_RESULT grCreateGraphicsPipeline(
     }
     if (result != VK_SUCCESS) {
         LOGE("vkCreateGraphicsPipelines failed\n");
-        if (layout != VK_NULL_HANDLE) {
-            vki.vkDestroyPipelineLayout(grDevice->device, layout, NULL);
-        }
         if (renderPass != VK_NULL_HANDLE) {
             vki.vkDestroyRenderPass(grDevice->device, renderPass, NULL);
         }
@@ -593,9 +554,9 @@ GR_RESULT grCreateGraphicsPipeline(
     }
     *grPipeline = (GrPipeline) {
         .sType = GR_STRUCT_TYPE_PIPELINE,
-        .pipelineLayout = layout,
         .pipeline = vkPipeline,
-        .renderPass = renderPass,
+        .pipelineLayout = layout,
+        .renderPass = renderPass
     };
 
     *pPipeline = (GR_PIPELINE)grPipeline;

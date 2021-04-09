@@ -185,6 +185,10 @@ void vulkanLoaderInstanceInit(VkInstance instance)
     LOAD_VULKAN_FN(vki, instance, vkCmdSetViewportWithCountEXT);
 #endif
 
+#ifdef VK_KHR_push_descriptor
+    LOAD_VULKAN_FN(vki, instance, vkCmdPushDescriptorSetKHR);
+#endif
+
 #ifdef VK_KHR_surface
     LOAD_VULKAN_FN(vki, instance, vkDestroySurfaceKHR);
     LOAD_VULKAN_FN(vki, instance, vkGetPhysicalDeviceSurfaceSupportKHR);

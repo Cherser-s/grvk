@@ -191,6 +191,54 @@ static unsigned getVirtualDescriptorSetBufferMemoryType(const VkPhysicalDeviceMe
     return hostMemoryType;
 }
 
+VkResult getVkPipelineLayout(VkDevice vkDevice,
+                             VkDescriptorSetLayout globalDescriptorSetLayout,
+                             VkDescriptorSetLayout graphicsDynamicMemoryLayout,
+                             VkDescriptorSetLayout computeDynamicMemoryLayout,
+                             GrGlobalPipelineLayouts* outLayouts
+    )
+{
+    const VkPushConstantRange pushRange = {
+        .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
+        .offset = 0,
+        .size = sizeof(uint64_t) * GR_MAX_DESCRIPTOR_SETS
+    };
+
+    const VkPushConstantRange computePushRange = {
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .offset = 0,
+        .size = sizeof(uint64_t) * GR_MAX_DESCRIPTOR_SETS
+    };
+
+    const VkDescriptorSetLayout graphicsLayouts[2] = {globalDescriptorSetLayout, graphicsDynamicMemoryLayout};
+    VkPipelineLayoutCreateInfo createInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pNext = NULL,
+        .flags = 0,
+        .setLayoutCount = 2,
+        .pSetLayouts = graphicsLayouts,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pushRange,
+    };
+    VkResult res = vki.vkCreatePipelineLayout(vkDevice, &createInfo, NULL, &outLayouts->graphicsPipelineLayout);
+    if (res != VK_SUCCESS) {
+        LOGE("vkCreatePipelineLayout failed for graphics pipeline layout\n");
+        goto bail;
+    }
+
+    const VkDescriptorSetLayout computeLayouts[2] = {globalDescriptorSetLayout, computeDynamicMemoryLayout};
+    // now create compute ones
+    createInfo.pPushConstantRanges = &computePushRange;
+    createInfo.pSetLayouts = computeLayouts;
+    res = vki.vkCreatePipelineLayout(vkDevice, &createInfo, NULL, &outLayouts->computePipelineLayout);
+    if (res != VK_SUCCESS) {
+        LOGE("vkCreatePipelineLayout failed for compute pipeline layout\n");
+        goto bail;
+    }
+bail:
+    return res;
+}
+
 GR_RESULT grCreateDevice(
     GR_PHYSICAL_GPU gpu,
     const GR_DEVICE_CREATE_INFO* pCreateInfo,
@@ -326,6 +374,7 @@ GR_RESULT grCreateDevice(
         VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
         VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
+        VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
     };
 
     const VkDeviceCreateInfo createInfo = {
@@ -461,9 +510,54 @@ GR_RESULT grCreateDevice(
         .pPoolSizes = poolSizes,
     };
     VkDescriptorSetLayout globalLayout;
+    VkDescriptorSetLayout graphicsDynamicMemoryLayout, computeDynamicMemoryLayout;
+    GrGlobalPipelineLayouts globalPipelineLayouts = {};
     if (vki.vkCreateDescriptorSetLayout(vkDevice, &layoutCreateInfo, NULL,
                                         &globalLayout) != VK_SUCCESS) {
         LOGE("vkCreateDescriptorSetLayout failed\n");
+        res = GR_ERROR_INITIALIZATION_FAILED;
+        goto bail;
+    }
+
+    VkDescriptorSetLayoutBinding dynamicLayoutBindings[2] = {
+        {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
+            .pImmutableSamplers = NULL,
+        },
+        {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
+            .pImmutableSamplers = NULL,
+        }
+    };
+    const VkDescriptorSetLayoutCreateInfo dynamicMemoryLayoutCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pNext = NULL,
+        .flags = 0,
+        .bindingCount = 2,
+        .pBindings = dynamicLayoutBindings,
+    };
+
+    if (vki.vkCreateDescriptorSetLayout(vkDevice, &dynamicMemoryLayoutCreateInfo, NULL, &graphicsDynamicMemoryLayout) != VK_SUCCESS) {
+        LOGE("vkCreateDescriptorSetLayout failed\n");
+        res = GR_ERROR_INITIALIZATION_FAILED;
+        goto bail;
+    }
+
+
+    if (vki.vkCreateDescriptorSetLayout(vkDevice, &dynamicMemoryLayoutCreateInfo, NULL, &computeDynamicMemoryLayout) != VK_SUCCESS) {
+        LOGE("vkCreateDescriptorSetLayout failed\n");
+        res = GR_ERROR_INITIALIZATION_FAILED;
+        goto bail;
+    }
+
+    if (getVkPipelineLayout(vkDevice, globalLayout, graphicsDynamicMemoryLayout, computeDynamicMemoryLayout, &globalPipelineLayouts) != VK_SUCCESS) {
+        LOGE("failed to create pipeline layouts\n");
         res = GR_ERROR_INITIALIZATION_FAILED;
         goto bail;
     }
@@ -516,6 +610,8 @@ GR_RESULT grCreateDevice(
         .computeCommandPool = computeCommandPool,
         .globalDescriptorSet = {
             .descriptorTableLayout = globalLayout,
+            .graphicsDynamicMemoryLayout = graphicsDynamicMemoryLayout,
+            .computeDynamicMemoryLayout = computeDynamicMemoryLayout,
             .descriptorPool = globalPool,
             .descriptorTable = globalDescSet,
             .samplers = descriptorHandleBuffer,
@@ -526,6 +622,7 @@ GR_RESULT grCreateDevice(
             .imagePtr = descriptorHandleBuffer + 2 * descriptorCount,
             .descriptorCount = descriptorCount,
         },
+        .pipelineLayouts = globalPipelineLayouts,
         .vDescriptorSetMemoryTypeIndex = 2//TODO: select this dynamically, this type if for radv only
     };
     vki.vkGetPhysicalDeviceMemoryProperties(
@@ -541,6 +638,18 @@ bail:
     free(queueCreateInfos);
 
     if (res != GR_SUCCESS) {
+        if (globalPipelineLayouts.graphicsPipelineLayout != VK_NULL_HANDLE) {
+            vki.vkDestroyPipelineLayout(vkDevice, globalPipelineLayouts.graphicsPipelineLayout, NULL);
+        }
+        if (globalPipelineLayouts.computePipelineLayout != VK_NULL_HANDLE) {
+            vki.vkDestroyPipelineLayout(vkDevice, globalPipelineLayouts.computePipelineLayout, NULL);
+        }
+        if (graphicsDynamicMemoryLayout != VK_NULL_HANDLE) {
+            vki.vkDestroyDescriptorSetLayout(vkDevice, graphicsDynamicMemoryLayout, NULL);
+        }
+        if (computeDynamicMemoryLayout != VK_NULL_HANDLE) {
+            vki.vkDestroyDescriptorSetLayout(vkDevice, computeDynamicMemoryLayout, NULL);
+        }
         if (universalCommandPool != VK_NULL_HANDLE) {
             vki.vkDestroyCommandPool(vkDevice, universalCommandPool, NULL);
         }
@@ -580,6 +689,18 @@ GR_RESULT grDestroyDevice(GR_DEVICE device)
     if (grDevice->computeCommandPool != VK_NULL_HANDLE) {
         vki.vkDestroyCommandPool(grDevice->device, grDevice->computeCommandPool, NULL);
     }
+    if (grDevice->pipelineLayouts.graphicsPipelineLayout != VK_NULL_HANDLE) {
+        vki.vkDestroyPipelineLayout(grDevice->device, grDevice->pipelineLayouts.graphicsPipelineLayout, NULL);
+    }
+    if (grDevice->pipelineLayouts.computePipelineLayout != VK_NULL_HANDLE) {
+        vki.vkDestroyPipelineLayout(grDevice->device, grDevice->pipelineLayouts.computePipelineLayout, NULL);
+    }
+    if (grDevice->globalDescriptorSet.graphicsDynamicMemoryLayout != VK_NULL_HANDLE) {
+        vki.vkDestroyDescriptorSetLayout(grDevice->device, grDevice->globalDescriptorSet.graphicsDynamicMemoryLayout, NULL);
+    }
+    if (grDevice->globalDescriptorSet.computeDynamicMemoryLayout != VK_NULL_HANDLE) {
+        vki.vkDestroyDescriptorSetLayout(grDevice->device, grDevice->globalDescriptorSet.computeDynamicMemoryLayout, NULL);
+    }
     if (grDevice->globalDescriptorSet.descriptorTableLayout != VK_NULL_HANDLE) {
         vki.vkDestroyDescriptorSetLayout(grDevice->device, grDevice->globalDescriptorSet.descriptorTableLayout, NULL);
     }
@@ -587,7 +708,7 @@ GR_RESULT grDestroyDevice(GR_DEVICE device)
         vki.vkDestroyDescriptorPool(grDevice->device, grDevice->globalDescriptorSet.descriptorPool, NULL);
     }
     if (grDevice->globalDescriptorSet.samplerPtr != NULL) {
-        free(grDevice->globalDescriptorSet.samplerPtr); // single allocation, samplers are first
+        free(grDevice->globalDescriptorSet.samplerPtr); // single allocation, samplers are first in the buffer
     }
     vki.vkDestroyDevice(grDevice->device, NULL);
     free(grDevice);
