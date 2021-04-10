@@ -91,6 +91,63 @@ static void initCmdBufferResources(
     grCmdBuffer->isDirty = false;
 }
 
+static VkDescriptorSet allocateDynamicBindingSet(GrCmdBuffer* grCmdBuffer, VkPipelineBindPoint bindPoint) {
+    VkDescriptorSetAllocateInfo allocInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorSetCount = 1,
+        .pSetLayouts = bindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS ? &grCmdBuffer->grDevice->globalDescriptorSet.graphicsDynamicMemoryLayout : &grCmdBuffer->grDevice->globalDescriptorSet.computeDynamicMemoryLayout, 
+    };
+    VkDescriptorSet outSet;
+    if (grCmdBuffer->dynamicBindingPools == NULL || grCmdBuffer->descriptorPoolCount == 0) {
+        goto pool_allocation;
+    }
+    allocInfo.descriptorPool = grCmdBuffer->dynamicBindingPools[grCmdBuffer->descriptorPoolCount - 1];
+    VkResult allocResult = vki.vkAllocateDescriptorSets(grCmdBuffer->grDevice->device, &allocInfo, &outSet);
+    if (allocResult == VK_SUCCESS) {
+        return outSet;
+    }
+    else if (allocResult != VK_ERROR_FRAGMENTED_POOL && allocResult != VK_ERROR_OUT_OF_POOL_MEMORY) {
+        LOGE("failed to properly allocate descriptor sets for dynamic binding: %d\n", allocResult);
+        assert(false);
+    }
+pool_allocation:
+    LOGT("Allocating a new descriptor pool for dynamic binding for buffer %p\n", grCmdBuffer);
+    // TODO: make "vector" more efficient
+    grCmdBuffer->dynamicBindingPools = (VkDescriptorPool*)realloc(grCmdBuffer->dynamicBindingPools, sizeof(VkDescriptorPool) * grCmdBuffer->descriptorPoolCount);
+    const unsigned dynamicDescriptorCount = 128;
+    const VkDescriptorPoolSize poolSizes[2] = {
+        {
+            .type = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
+            .descriptorCount = dynamicDescriptorCount,
+        },
+        {
+            .type = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
+            .descriptorCount = dynamicDescriptorCount,
+        }
+    };
+    const VkDescriptorPoolCreateInfo poolCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .pNext = NULL,
+        .flags = 0,
+        .maxSets = dynamicDescriptorCount,
+        .poolSizeCount = 2,
+        .pPoolSizes = poolSizes,
+    };
+    VkDescriptorPool tempPool;
+    if (vki.vkCreateDescriptorPool(grCmdBuffer->grDevice->device, &poolCreateInfo, NULL,
+                                   &tempPool) != VK_SUCCESS) {
+        LOGE("vkCreateDescriptorPool for dynamic binding failed\n");
+        assert(false);
+    }
+    grCmdBuffer->dynamicBindingPools[grCmdBuffer->descriptorPoolCount++] = tempPool;
+    allocInfo.descriptorPool = tempPool;
+    if (vki.vkAllocateDescriptorSets(grCmdBuffer->grDevice->device, &allocInfo, &outSet) != VK_SUCCESS) {
+        LOGE("vkAllocateDescriptorSets failed for created descriptor pool\n");
+        assert(false);
+    }
+    return outSet;
+}
+
 static void initDynamicBuffers(GrCmdBuffer* grCmdBuffer, VkPipelineBindPoint bindPoint)
 {
     grCmdBuffer->dynamicMemoryViews = (VkBufferView*)realloc(grCmdBuffer->dynamicMemoryViews, sizeof(VkBufferView) * (1 + grCmdBuffer->dynamicBufferViewsCount));
@@ -105,11 +162,14 @@ static void initDynamicBuffers(GrCmdBuffer* grCmdBuffer, VkPipelineBindPoint bin
     VkBufferView bufferView;
     assert(vki.vkCreateBufferView(grCmdBuffer->grDevice->device, &createInfo, NULL, &bufferView) == VK_SUCCESS);
     grCmdBuffer->dynamicMemoryViews[grCmdBuffer->dynamicBufferViewsCount] = bufferView;
+
+    bool pushDescriptorsSupported = grCmdBuffer->grDevice->pushDescriptorSetSupported;
+    VkDescriptorSet writeSet = pushDescriptorsSupported ? VK_NULL_HANDLE : allocateDynamicBindingSet(grCmdBuffer, bindPoint);
     VkWriteDescriptorSet writeDescriptorSet[2] = {
         {
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .pNext = NULL,
-            .dstSet = VK_NULL_HANDLE,
+            .dstSet = writeSet,
             .dstBinding = 0,
             .dstArrayElement = 0,
             .descriptorCount = 1,
@@ -121,7 +181,7 @@ static void initDynamicBuffers(GrCmdBuffer* grCmdBuffer, VkPipelineBindPoint bin
         {
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .pNext = NULL,
-            .dstSet = VK_NULL_HANDLE,
+            .dstSet = writeSet,
             .dstBinding = 1,
             .dstArrayElement = 0,
             .descriptorCount = 1,
@@ -130,13 +190,19 @@ static void initDynamicBuffers(GrCmdBuffer* grCmdBuffer, VkPipelineBindPoint bin
             .pBufferInfo = NULL,
             .pTexelBufferView = &bufferView,
         }
-    };//TODO: write this in basic descriptor set if this extension is not supported
-
-    vki.vkCmdPushDescriptorSetKHR(grCmdBuffer->commandBuffer, bindPoint,
-                                  bindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS ? grCmdBuffer->grDevice->pipelineLayouts.graphicsPipelineLayout : grCmdBuffer->grDevice->pipelineLayouts.computePipelineLayout,
-                                  1,//TODO: move in define upwards
-                                  2, writeDescriptorSet);
-
+    };
+    VkPipelineLayout layout = bindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS ? grCmdBuffer->grDevice->pipelineLayouts.graphicsPipelineLayout : grCmdBuffer->grDevice->pipelineLayouts.computePipelineLayout;
+    if (pushDescriptorsSupported) {
+        vki.vkCmdPushDescriptorSetKHR(grCmdBuffer->commandBuffer, bindPoint,
+                                      layout,
+                                      1,//TODO: move in define upwards
+                                      2, writeDescriptorSet);
+    }
+    else {
+        vki.vkUpdateDescriptorSets(grCmdBuffer->grDevice->device, 2, writeDescriptorSet, 0, NULL);
+        vki.vkCmdBindDescriptorSets(grCmdBuffer->commandBuffer, bindPoint,
+                                    layout, 1, 1, &writeSet, 0, NULL);
+    }
     grCmdBuffer->dynamicBufferViewsCount++;
     grCmdBuffer->isDynamicBufferDirty = false;//TODO:change different flags for compute pipeline
 }

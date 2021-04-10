@@ -55,6 +55,8 @@ GR_RESULT grCreateCommandBuffer(
         .minExtent2D = { 0, 0 },
         .dynamicMemoryViews = NULL,
         .dynamicBufferViewsCount = 0,
+        .dynamicBindingPools = NULL,
+        .descriptorPoolCount = 0,
         .graphicsBufferInfo = {},
         .computeBufferInfo = {},
         .minLayerCount = 0,

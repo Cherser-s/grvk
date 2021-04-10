@@ -57,6 +57,8 @@ typedef struct _GrCmdBuffer {
     uint32_t minLayerCount;
     VkBufferView *dynamicMemoryViews;
     unsigned dynamicBufferViewsCount;
+    VkDescriptorPool* dynamicBindingPools;
+    unsigned descriptorPoolCount;
     GR_MEMORY_VIEW_ATTACH_INFO graphicsBufferInfo;
     GR_MEMORY_VIEW_ATTACH_INFO computeBufferInfo;
     bool hasActiveRenderPass;
@@ -170,6 +172,7 @@ typedef struct _GrDevice {
     GrGlobalDescriptorSet globalDescriptorSet;
     GrGlobalPipelineLayouts pipelineLayouts;
     unsigned vDescriptorSetMemoryTypeIndex;
+    bool pushDescriptorSetSupported;// TODO: move this in separate struct
 } GrDevice;
 
 typedef struct _GrFence {

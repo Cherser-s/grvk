@@ -370,12 +370,38 @@ GR_RESULT grCreateDevice(
         .shaderInt64 = VK_TRUE,//TODO: try to fallback to 32 bit version if not present
     };
 
-    const char *deviceExtensions[] = {
+    unsigned extensionCount = 0;
+    if (vki.vkEnumerateDeviceExtensionProperties(grPhysicalGpu->physicalDevice, NULL, &extensionCount, NULL) != VK_SUCCESS) {
+        LOGE("vkEnumerateDeviceExtensionProperties failed\n");
+        res = GR_ERROR_INITIALIZATION_FAILED;
+        goto bail;
+    }
+    VkExtensionProperties* extensionProperties = (VkExtensionProperties*)malloc(sizeof(VkExtensionProperties) * extensionCount);
+    if (extensionProperties == NULL) {
+        res = GR_ERROR_INITIALIZATION_FAILED;
+        goto bail;
+    }
+    if (vki.vkEnumerateDeviceExtensionProperties(grPhysicalGpu->physicalDevice, NULL, &extensionCount, extensionProperties) != VK_SUCCESS) {
+        LOGE("vkEnumerateDeviceExtensionProperties failed\n");
+        res = GR_ERROR_INITIALIZATION_FAILED;
+        goto bail;
+    }
+    const char *deviceExtensions[4] = {
         VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
         VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,
-        VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
+        NULL,
     };
+    unsigned deviceExtensionCount = 3;
+    bool pushDescriptorsSupported = false;
+    for (unsigned i = 0; i < extensionCount; ++i) {
+        if (strcmp(extensionProperties[i].extensionName, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME) == 0) {
+            deviceExtensions[deviceExtensionCount++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
+            pushDescriptorsSupported = true;
+            LOGT("push descriptor set is supported\n");
+            break;
+        }
+    }
 
     const VkDeviceCreateInfo createInfo = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -385,7 +411,7 @@ GR_RESULT grCreateDevice(
         .pQueueCreateInfos = queueCreateInfos,
         .enabledLayerCount = 0,
         .ppEnabledLayerNames = NULL,
-        .enabledExtensionCount = sizeof(deviceExtensions) / sizeof(deviceExtensions[0]),
+        .enabledExtensionCount = deviceExtensionCount,
         .ppEnabledExtensionNames = deviceExtensions,
         .pEnabledFeatures = &deviceFeatures,
     };
@@ -623,7 +649,8 @@ GR_RESULT grCreateDevice(
             .descriptorCount = descriptorCount,
         },
         .pipelineLayouts = globalPipelineLayouts,
-        .vDescriptorSetMemoryTypeIndex = 2//TODO: select this dynamically, this type if for radv only
+        .vDescriptorSetMemoryTypeIndex = 2,
+        .pushDescriptorSetSupported = pushDescriptorsSupported,
     };
     vki.vkGetPhysicalDeviceMemoryProperties(
         grPhysicalGpu->physicalDevice,
@@ -635,8 +662,9 @@ bail:
     for (int i = 0; i < pCreateInfo->queueRecordCount; i++) {
         free((void*)queueCreateInfos[i].pQueuePriorities);
     }
-    free(queueCreateInfos);
-
+    if (extensionProperties != NULL) {
+        free(extensionProperties);
+    }
     if (res != GR_SUCCESS) {
         if (globalPipelineLayouts.graphicsPipelineLayout != VK_NULL_HANDLE) {
             vki.vkDestroyPipelineLayout(vkDevice, globalPipelineLayouts.graphicsPipelineLayout, NULL);
