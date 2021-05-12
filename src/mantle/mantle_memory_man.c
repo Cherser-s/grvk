@@ -208,8 +208,9 @@ GR_RESULT grFreeMemory(
     }
 
     GrDevice* grDevice = GET_OBJ_DEVICE(grGpuMemory);
-
-    VKD.vkDestroyBuffer(grDevice->device, grGpuMemory->buffer, NULL);
+    if (grGpuMemory->buffer != VK_NULL_HANDLE) {
+        VKD.vkDestroyBuffer(grDevice->device, grGpuMemory->buffer, NULL);
+    }
     VKD.vkFreeMemory(grDevice->device, grGpuMemory->deviceMemory, NULL);
     free(grGpuMemory);
 

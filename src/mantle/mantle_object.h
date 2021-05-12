@@ -71,6 +71,7 @@ typedef struct _DescriptorSetSlot
         } imageView;
         struct {
             VkBuffer vkBuffer;
+            VkBufferView vkBufferView;
             VkFormat vkFormat;
             VkDeviceSize offset;
             VkDeviceSize range;
@@ -184,6 +185,9 @@ typedef struct _GrDescriptorSet {
     GrObject grObj;
     unsigned slotCount;
     DescriptorSetSlot* slots;
+    VkDescriptorSetLayout hostDescSetLayout;
+    VkDescriptorPool hostPool;
+    VkDescriptorSet hostDescriptorSet;
 } GrDescriptorSet;
 
 typedef struct _GrDevice {
@@ -194,6 +198,7 @@ typedef struct _GrDevice {
     VkPhysicalDeviceMemoryProperties memoryProperties;
     unsigned universalQueueIndex;
     unsigned computeQueueIndex;
+    bool mutableDescriptorsSupported;
 } GrDevice;
 
 typedef struct _GrEvent {

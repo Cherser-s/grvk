@@ -82,6 +82,52 @@ static VkDescriptorPool getVkDescriptorPool(
     return descriptorPool;
 }
 
+static const DescriptorSetSlot* getHostDescriptorSet(
+    const GrDescriptorSet* grDescriptorSet,
+    unsigned slotOffset,
+    const GR_DESCRIPTOR_SET_MAPPING* mapping,
+    uint32_t bindingIndex,
+    GrDescriptorSet **outDescSet,
+    uint32_t *outArrayElement)
+{
+    for (unsigned i = 0; i < mapping->descriptorCount; i++) {
+        const GR_DESCRIPTOR_SLOT_INFO* slotInfo = &mapping->pDescriptorInfo[i];
+        const DescriptorSetSlot* slot = &grDescriptorSet->slots[slotOffset + i];
+
+        if (slotInfo->slotObjectType == GR_SLOT_UNUSED) {
+            continue;
+        } else if (slotInfo->slotObjectType == GR_SLOT_NEXT_DESCRIPTOR_SET) {
+            if (slot->type == SLOT_TYPE_NONE) {
+                continue;
+            } else if (slot->type != SLOT_TYPE_NESTED) {
+                LOGE("unexpected slot type %d (should be nested)\n", slot->type);
+                assert(false);
+            }
+
+            const DescriptorSetSlot* nestedSlot =
+                getHostDescriptorSet(slot->nested.nextSet, slot->nested.slotOffset,
+                                     slotInfo->pNextLevelSet, bindingIndex, outDescSet, outArrayElement);
+            if (nestedSlot != NULL) {
+                return nestedSlot;
+            } else {
+                continue;
+            }
+        }
+
+        uint32_t slotBinding = slotInfo->shaderEntityIndex;
+        if (slotInfo->slotObjectType != GR_SLOT_SHADER_SAMPLER) {
+            slotBinding += ILC_BASE_RESOURCE_ID;
+        }
+
+        if (slotBinding == bindingIndex) {
+            *outArrayElement = slotOffset + i;
+            *outDescSet = grDescriptorSet;
+            return slot;
+        }
+    }
+    return NULL;
+}
+
 static const DescriptorSetSlot* getDescriptorSetSlot(
     const GrDescriptorSet* grDescriptorSet,
     unsigned slotOffset,
@@ -123,6 +169,122 @@ static const DescriptorSetSlot* getDescriptorSetSlot(
     }
 
     return NULL;
+}
+
+static void updateVkDescriptorSetMutable(
+    const GrDevice* grDevice,
+    GrCmdBuffer* grCmdBuffer,
+    VkDescriptorSet vkDescriptorSet,
+    unsigned slotOffset,
+    const GR_PIPELINE_SHADER* shaderInfo,
+    const GrDescriptorSet* grDescriptorSet,
+    const DescriptorSetSlot* dynamicMemoryView)
+{
+    const GrShader* grShader = (GrShader*)shaderInfo->shader;
+    const GR_DYNAMIC_MEMORY_VIEW_SLOT_INFO* dynamicMapping = &shaderInfo->dynamicMemoryViewMapping;
+    VkResult vkRes;
+
+    if (grShader == NULL || grShader->bindingCount == 0) {
+        // Nothing to update
+        return;
+    }
+    VkBufferView dynamicBufferView = VK_NULL_HANDLE;
+    VkDescriptorBufferInfo dynamicBufferInfo;
+    VkWriteDescriptorSet dynamicWriteInfo;
+
+    bool usesDynamicResources = dynamicMapping->slotObjectType != GR_SLOT_UNUSED;
+    bool hasDynamicResources = false;
+    VkCopyDescriptorSet *copies = malloc(sizeof(VkCopyDescriptorSet) * grShader->bindingCount);
+    assert(copies != NULL);
+
+    unsigned copyCount = 0;
+    for (unsigned i = 0; i < grShader->bindingCount; i++) {
+        const IlcBinding* binding = &grShader->bindings[i];
+        if (usesDynamicResources && binding->index == (ILC_BASE_RESOURCE_ID + dynamicMapping->shaderEntityIndex)) {
+            if (binding->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
+                binding->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
+                const VkBufferViewCreateInfo createInfo = {
+                    .sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO,
+                    .pNext = NULL,
+                    .flags = 0,
+                    .buffer = dynamicMemoryView->memoryView.vkBuffer,
+                    .format = dynamicMemoryView->memoryView.vkFormat,
+                    .offset = dynamicMemoryView->memoryView.offset,
+                    .range = dynamicMemoryView->memoryView.range,
+                };
+
+                vkRes = VKD.vkCreateBufferView(grDevice->device, &createInfo, NULL, &dynamicBufferView);
+                if (vkRes != VK_SUCCESS) {
+                    LOGE("vkCreateBufferView failed (%d)\n", vkRes);
+                    assert(false);
+                }
+            }
+            else if (binding->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
+                dynamicBufferInfo = (VkDescriptorBufferInfo) {
+                    .buffer = dynamicMemoryView->memoryView.vkBuffer,
+                    .offset = dynamicMemoryView->memoryView.offset,
+                    .range =  dynamicMemoryView->memoryView.range,
+                };
+            }
+            else {
+                LOGE("invalid descriptor type for dynamic binding %d\n", binding->descriptorType);
+                assert(false);
+            }
+            dynamicWriteInfo = (VkWriteDescriptorSet) {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .pNext = NULL,
+                .descriptorType = binding->descriptorType,
+                .dstBinding = binding->index,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .dstSet = vkDescriptorSet,
+                .pBufferInfo = (dynamicBufferView == VK_NULL_HANDLE) ? &dynamicBufferInfo : NULL,
+                .pImageInfo = NULL,
+                .pTexelBufferView = (dynamicBufferView != VK_NULL_HANDLE) ? &dynamicBufferView : NULL,
+            };
+            hasDynamicResources = true;
+            continue;
+        }
+        GrDescriptorSet* hostSet = NULL;
+        unsigned hostSetArrayElement = 0;
+        if (getHostDescriptorSet(grDescriptorSet, slotOffset,
+                                 &shaderInfo->descriptorSetMapping[0], binding->index, &hostSet, &hostSetArrayElement) == NULL) {
+            LOGE("can't find slot for binding %d\n", binding->index);
+            assert(false);
+        }
+        copies[copyCount] = (VkCopyDescriptorSet) {
+            .sType = VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET,
+            .pNext = NULL,
+            .srcSet = hostSet->hostDescriptorSet,
+            .srcBinding = 0,
+            .srcArrayElement = 0,
+            .descriptorCount = 1,
+            .dstSet = vkDescriptorSet,
+            .dstBinding = binding->index,
+            .dstArrayElement = 0,
+        };
+        if (binding->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
+            copies[copyCount].srcBinding = hostSet->slotCount;
+            copies[copyCount].srcArrayElement = hostSetArrayElement;
+        }
+        else if (binding->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER) {
+            copies[copyCount].srcBinding = hostSet->slotCount + 1;
+            copies[copyCount].srcArrayElement = hostSetArrayElement;
+        }
+        else {
+            copies[copyCount].srcBinding = hostSetArrayElement;
+        }
+        copyCount++;
+    }
+    VKD.vkUpdateDescriptorSets(grDevice->device, hasDynamicResources ? 1 : 0, &dynamicWriteInfo, copyCount, copies);
+    free(copies);
+    // Track buffer view
+    if (dynamicBufferView != VK_NULL_HANDLE) {
+        grCmdBuffer->bufferViewCount++;
+        grCmdBuffer->bufferViews = realloc(grCmdBuffer->bufferViews,
+                                           grCmdBuffer->bufferViewCount * sizeof(VkBufferView));
+        grCmdBuffer->bufferViews[grCmdBuffer->bufferViewCount - 1] = dynamicBufferView;
+    }
 }
 
 static void updateVkDescriptorSet(
@@ -314,6 +476,7 @@ static void grCmdBufferUpdateDescriptorSets(
 {
     const GrDevice* grDevice = GET_OBJ_DEVICE(grCmdBuffer);
     GrPipeline* grPipeline = grCmdBuffer->bindPoint[bindPoint].grPipeline;
+    bool useMutableDescriptors = grDevice->mutableDescriptorsSupported;
     VkResult vkRes;
 
     for (unsigned i = 0; i < 2; i++) {
@@ -355,12 +518,22 @@ static void grCmdBufferUpdateDescriptorSets(
     }
 
     for (unsigned i = 0; i < grPipeline->stageCount; i++) {
-        updateVkDescriptorSet(grDevice, grCmdBuffer,
-                              grCmdBuffer->bindPoint[bindPoint].descriptorSets[i],
-                              grCmdBuffer->bindPoint[bindPoint].slotOffset,
-                              &grPipeline->shaderInfos[i],
-                              grCmdBuffer->bindPoint[bindPoint].grDescriptorSet,
-                              &grCmdBuffer->bindPoint[bindPoint].dynamicMemoryView);
+        if (useMutableDescriptors) {
+            updateVkDescriptorSetMutable(grDevice, grCmdBuffer,
+                                  grCmdBuffer->bindPoint[bindPoint].descriptorSets[i],
+                                  grCmdBuffer->bindPoint[bindPoint].slotOffset,
+                                  &grPipeline->shaderInfos[i],
+                                  grCmdBuffer->bindPoint[bindPoint].grDescriptorSet,
+                                  &grCmdBuffer->bindPoint[bindPoint].dynamicMemoryView);
+        } else {
+            updateVkDescriptorSet(grDevice, grCmdBuffer,
+                                  grCmdBuffer->bindPoint[bindPoint].descriptorSets[i],
+                                  grCmdBuffer->bindPoint[bindPoint].slotOffset,
+                                  &grPipeline->shaderInfos[i],
+                                  grCmdBuffer->bindPoint[bindPoint].grDescriptorSet,
+                                  &grCmdBuffer->bindPoint[bindPoint].dynamicMemoryView);
+        }
+
     }
 
     VKD.vkCmdBindDescriptorSets(grCmdBuffer->commandBuffer, bindPoint, grPipeline->pipelineLayout,

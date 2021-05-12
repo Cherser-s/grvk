@@ -332,21 +332,55 @@ GR_RESULT grCreateDevice(
         .fragmentStoresAndAtomics = VK_TRUE,
     };
 
+    unsigned extensionCount = 0;
+    VkExtensionProperties* extensionProperties = NULL;
+    if (vki.vkEnumerateDeviceExtensionProperties(grPhysicalGpu->physicalDevice, NULL, &extensionCount, NULL) != VK_SUCCESS) {
+        LOGE("vkEnumerateDeviceExtensionProperties failed\n");
+        res = GR_ERROR_INITIALIZATION_FAILED;
+        goto bail;
+    }
+    extensionProperties = (VkExtensionProperties*)malloc(sizeof(VkExtensionProperties) * extensionCount);
+    if (extensionProperties == NULL) {
+        res = GR_ERROR_INITIALIZATION_FAILED;
+        goto bail;
+    }
+    if (vki.vkEnumerateDeviceExtensionProperties(grPhysicalGpu->physicalDevice, NULL, &extensionCount, extensionProperties) != VK_SUCCESS) {
+        LOGE("vkEnumerateDeviceExtensionProperties failed\n");
+        res = GR_ERROR_INITIALIZATION_FAILED;
+        goto bail;
+    }
     const char *deviceExtensions[] = {
         VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,
         VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME,
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        NULL,
     };
 
+    bool mutableDescriptorsSupported = false;
+    unsigned deviceExtensionCount = 3;
+    for (unsigned i = 0; i < extensionCount; ++i) {
+        if (strcmp(extensionProperties[i].extensionName, VK_VALVE_MUTABLE_DESCRIPTOR_TYPE_EXTENSION_NAME) == 0) {
+            deviceExtensions[deviceExtensionCount++] = VK_VALVE_MUTABLE_DESCRIPTOR_TYPE_EXTENSION_NAME;
+            mutableDescriptorsSupported = true;
+            LOGI("push descriptor set is supported\n");
+            break;
+        }
+    }
+
+    const VkPhysicalDeviceMutableDescriptorTypeFeaturesVALVE mutableDescriptorTypeFeatures = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MUTABLE_DESCRIPTOR_TYPE_FEATURES_VALVE,
+        .pNext = &demoteToHelperInvocation,
+        .mutableDescriptorType = mutableDescriptorsSupported ? VK_TRUE : VK_FALSE,
+    };
     const VkDeviceCreateInfo createInfo = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .pNext = &demoteToHelperInvocation,
+        .pNext = &mutableDescriptorTypeFeatures,
         .flags = 0,
         .queueCreateInfoCount = pCreateInfo->queueRecordCount,
         .pQueueCreateInfos = queueCreateInfos,
         .enabledLayerCount = 0,
         .ppEnabledLayerNames = NULL,
-        .enabledExtensionCount = COUNT_OF(deviceExtensions),
+        .enabledExtensionCount = deviceExtensionCount,
         .ppEnabledExtensionNames = deviceExtensions,
         .pEnabledFeatures = &deviceFeatures,
     };
@@ -380,6 +414,7 @@ GR_RESULT grCreateDevice(
         .memoryProperties = memoryProperties,
         .universalQueueIndex = universalQueueIndex,
         .computeQueueIndex = computeQueueIndex,
+        .mutableDescriptorsSupported = mutableDescriptorsSupported,
     };
 
     *pDevice = (GR_DEVICE)grDevice;
@@ -389,7 +424,9 @@ bail:
         free((void*)queueCreateInfos[i].pQueuePriorities);
     }
     free(queueCreateInfos);
-
+    if (extensionProperties != NULL) {
+        free(extensionProperties);
+    }
     if (res != GR_SUCCESS) {
         vkd.vkDestroyDevice(vkDevice, NULL);
     }
