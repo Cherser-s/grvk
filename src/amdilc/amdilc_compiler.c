@@ -1078,6 +1078,41 @@ static void emitTypedUav(
     addResource(compiler, &resource);
 }
 
+static void emitRawSrv(
+    IlcCompiler* compiler,
+    const Instruction* instr)
+{
+    uint16_t id = GET_BITS(instr->control, 0, 13);
+
+    IlcSpvId arrayId = ilcSpvPutRuntimeArrayType(compiler->module, compiler->floatId, true);
+    IlcSpvId structId = ilcSpvPutStructType(compiler->module, 1, &arrayId);
+    IlcSpvId pointerId = ilcSpvPutPointerType(compiler->module, SpvStorageClassStorageBuffer,
+                                              structId);
+    IlcSpvId resourceId = ilcSpvPutVariable(compiler->module, pointerId,
+                                            SpvStorageClassStorageBuffer);
+
+    IlcSpvWord arrayStride = sizeof(float);
+    IlcSpvWord memberOffset = 0;
+    ilcSpvPutDecoration(compiler->module, arrayId, SpvDecorationArrayStride, 1, &arrayStride);
+    ilcSpvPutDecoration(compiler->module, structId, SpvDecorationBlock, 0, NULL);
+    ilcSpvPutMemberDecoration(compiler->module, structId, 0, SpvDecorationOffset, 1, &memberOffset);
+    ilcSpvPutDecoration(compiler->module, resourceId, SpvDecorationNonWritable, 0, NULL);
+
+    ilcSpvPutName(compiler->module, arrayId, "rawSrv");
+    emitBinding(compiler, resourceId, ILC_BASE_RESOURCE_ID + id, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+
+    const IlcResource resource = {
+        .id = resourceId,
+        .typeId = arrayId,
+        .texelTypeId = compiler->floatId,
+        .ilId = id,
+        .ilType = IL_USAGE_PIXTEX_UNKNOWN,
+        .strideId = 0,
+    };
+
+    addResource(compiler, &resource);
+}
+
 static void emitStructuredSrv(
     IlcCompiler* compiler,
     const Instruction* instr)
@@ -2125,13 +2160,38 @@ static void emitUavAtomicOp(
     IlcSpvId src1Id = loadSource(compiler, &instr->srcs[1], COMP_MASK_XYZW, vecTypeId);
     IlcSpvId valueId = emitVectorTrim(compiler, src1Id, vecTypeId, COMP_INDEX_X, 1);
 
-    if (instr->opcode == IL_OP_UAV_ADD || instr->opcode == IL_OP_UAV_READ_ADD) {
-        readId = ilcSpvPutAtomicOp(compiler->module, SpvOpAtomicIAdd, resource->texelTypeId,
-                                   texelPtrId, scopeId, semanticsId, valueId);
-    } else {
+    IlcSpvWord operation;
+    switch (instr->opcode) {
+    case IL_OP_UAV_ADD:
+    case IL_OP_UAV_READ_ADD:
+        operation = SpvOpAtomicIAdd;
+        break;
+    case IL_OP_UAV_MAX:
+    case IL_OP_UAV_READ_MAX:
+        operation = SpvOpAtomicSMax;
+        break;
+    case IL_OP_UAV_MIN:
+    case IL_OP_UAV_READ_MIN:
+        operation = SpvOpAtomicSMin;
+        break;
+    case IL_OP_UAV_OR:
+    case IL_OP_UAV_READ_OR:
+        operation = SpvOpAtomicOr;
+        break;
+    case IL_OP_UAV_AND:
+    case IL_OP_UAV_READ_AND:
+        operation = SpvOpAtomicAnd;
+        break;
+    case IL_OP_UAV_XOR:
+    case IL_OP_UAV_READ_XOR:
+        operation = SpvOpAtomicXor;
+        break;
+    default:
         assert(false);
+        break;
     }
-
+    readId = ilcSpvPutAtomicOp(compiler->module, operation, resource->texelTypeId,
+                               texelPtrId, scopeId, semanticsId, valueId);
     if (instr->dstCount > 0) {
         IlcSpvId resId = emitVectorGrow(compiler, readId, resource->texelTypeId, 1);
         storeDestination(compiler, &instr->dsts[0], resId, vecTypeId);
@@ -2201,6 +2261,65 @@ static void emitStructuredSrvLoad(
                                                   4, constituents);
     storeDestination(compiler, dst, loadId, compiler->float4Id);
 }
+
+static void emitRawSrvLoad(
+    IlcCompiler* compiler,
+    const Instruction* instr)
+{
+    uint8_t ilResourceId = GET_BITS(instr->control, 0, 7);
+    bool indexedResourceId = GET_BIT(instr->control, 12);
+
+    if (indexedResourceId) {
+        LOGW("unhandled indexed resource ID\n");
+    }
+
+    const IlcResource* resource = findResource(compiler, ilResourceId);
+    const Destination* dst = &instr->dsts[0];
+
+    if (resource == NULL) {
+        LOGE("resource %d not found\n", ilResourceId);
+        return;
+    }
+
+    IlcSpvId srcId = loadSource(compiler, &instr->srcs[0], COMP_MASK_XYZW, compiler->int4Id);
+    IlcSpvId byteAddrId = emitVectorTrim(compiler, srcId, compiler->int4Id, COMP_INDEX_X, 1);
+
+    const IlcSpvId divIds[] = {
+        byteAddrId, ilcSpvPutConstant(compiler->module, compiler->intId, 4)
+    };
+    IlcSpvId wordAddrId = ilcSpvPutAlu(compiler->module, SpvOpSDiv, compiler->intId, 2, divIds);
+
+    // Read up to four components based on the destination mask
+    IlcSpvId zeroId = ilcSpvPutConstant(compiler->module, compiler->intId, ZERO_LITERAL);
+    IlcSpvId oneId = ilcSpvPutConstant(compiler->module, compiler->intId, 1);
+    IlcSpvId ptrTypeId = ilcSpvPutPointerType(compiler->module, SpvStorageClassStorageBuffer,
+                                              resource->texelTypeId);
+    IlcSpvId fZeroId = ilcSpvPutConstant(compiler->module, compiler->floatId, ZERO_LITERAL);
+    IlcSpvWord constituents[] = { fZeroId, fZeroId, fZeroId, fZeroId };
+
+    for (unsigned i = 0; i < 4; i++) {
+        if (dst->component[i] == IL_MODCOMP_NOWRITE) {
+            break;
+        }
+
+        if (i > 0) {
+            // Increment address
+            const IlcSpvId incrementIds[] = { wordAddrId, oneId };
+            wordAddrId = ilcSpvPutAlu(compiler->module, SpvOpIAdd, compiler->intId,
+                                      2, incrementIds);
+        }
+
+        const IlcSpvId indexIds[] = { zeroId, wordAddrId };
+        IlcSpvId ptrId = ilcSpvPutAccessChain(compiler->module, ptrTypeId, resource->id,
+                                              2, indexIds);
+        constituents[i] = ilcSpvPutLoad(compiler->module, resource->texelTypeId, ptrId);
+    }
+
+    IlcSpvId loadId = ilcSpvPutCompositeConstruct(compiler->module, compiler->float4Id,
+                                                  4, constituents);
+    storeDestination(compiler, dst, loadId, compiler->float4Id);
+}
+
 
 static void emitImplicitInput(
     IlcCompiler* compiler,
@@ -2407,6 +2526,16 @@ static void emitInstr(
         break;
     case IL_OP_UAV_ADD:
     case IL_OP_UAV_READ_ADD:
+    case IL_OP_UAV_MAX:
+    case IL_OP_UAV_READ_MAX:
+    case IL_OP_UAV_MIN:
+    case IL_OP_UAV_READ_MIN:
+    case IL_OP_UAV_AND:
+    case IL_OP_UAV_READ_AND:
+    case IL_OP_UAV_OR:
+    case IL_OP_UAV_READ_OR:
+    case IL_OP_UAV_XOR:
+    case IL_OP_UAV_READ_XOR:
         emitUavAtomicOp(compiler, instr);
         break;
     case IL_OP_DCL_STRUCT_SRV:
@@ -2414,6 +2543,12 @@ static void emitInstr(
         break;
     case IL_OP_SRV_STRUCT_LOAD:
         emitStructuredSrvLoad(compiler, instr);
+        break;
+    case IL_OP_DCL_RAW_SRV:
+        emitRawSrv(compiler, instr);
+        break;
+    case IL_OP_SRV_RAW_LOAD:
+        emitRawSrvLoad(compiler, instr);
         break;
     case IL_DCL_STRUCT_LDS:
         emitStructuredLds(compiler, instr);
